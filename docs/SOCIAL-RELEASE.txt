@@ -1,0 +1,49 @@
+I spent the last few weeks building something that probably shouldn't exist, but I think the security community needs to see it.
+
+It's called ArcticFox C3. It's a command-and-control framework written entirely in Rust, and it communicates through invisible text in public GitHub README files. No listening ports. No custom protocols. No network signatures you can fingerprint. Ten crates. GPL-3.0 licensed. Every single thing is open source.
+
+The idea started as a Python script that swallowed errors and couldn't survive a reboot. I tore it down and rebuilt it from scratch in Rust 2024 edition. Ring for every crypto operation — ChaCha20-Poly1305 AEAD, constant-time token comparison, PBKDF2 key derivation. Zero unwrap calls in production code. If something can fail, it returns a proper Result.
+
+Here's the C2 channel. Commands are encrypted with ChaCha20-Poly1305, then encoded into invisible zero-width Unicode characters — four characters per byte using U+200B, U+200C, U+200D, and U+FEFF. That invisible text gets injected into a GitHub README after the first heading. The README renders normally. The commands are there, you just literally cannot see them. The implant polls multiple repos in random order with jitter. If GitHub takes one repo down, it silently fails over. The heartbeat goes through Google's open redirect — it looks like someone clicking a google.com/url link.
+
+Then I went through every MITRE ATT&CK detection strategy and built bypasses for each one.
+
+MITRE has eight documented strategies that should detect what we're doing. I bypassed all of them.
+
+DET0920 is the Invisible Unicode strategy. They look for scripts with high Unicode density followed by base64 decode and eval, or Unicode payloads reconstructed via JavaScript or AppleScript. Our bypass: we embed ZW in real markdown files, not scripts. There's no script interpreter involved — we decode in pure Rust in-memory. The Unicode density is low because the README has thousands of visible characters. We inject a block of random visible text as camouflage padding between the heading and the payload. No eval. No JavaScript engine. No AppleScript.
+
+DET0058 is the Dead Drop Resolver strategy. They look for auditd connect syscalls from unusual processes to web services, with high payload entropy. Our bypass: HTTP/2 connection pooling keeps a single TCP connection alive for all poll cycles. Auditd sees one connect event at startup, then nothing. We rotate User-Agent and Accept headers so every request looks like a different browser session. The ZW payload has low entropy because it's base-4 encoded, not base64 — it looks like whitespace, not encrypted data.
+
+DET0196 is the Domain Fronting strategy. They look for TLS SNI mismatched with the HTTP Host header, or absent SNI from curl and wget. Our bypass: we use api.github.com for both SNI and Host — no mismatch anywhere in the TLS handshake. We use rustls, not curl, so there's no external binary fingerprint. The heartbeat uses google.com for both SNI and Host — same domain, no mismatch. Zero detection surface for the entire DET0196 strategy family.
+
+Beyond the MITRE-specific bypasses, I built an anti-forensics module that removes every forensic artifact the implant leaves behind.
+
+The process list shows sshd. But /proc/pid/exe still points to /tmp/.sshd — dead giveaway. Fixed. The implant now bind-mounts the real /usr/sbin/sshd over /proc/self/exe. lsof shows /etc/ssh/sshd_config and /var/log/auth.log because we deliberately open those files and keep the file descriptors. The parent-child lineage shows systemd to sshd because we set PR_SET_PDEATHSIG. The cron entry has a timestamp matching the oldest file in /etc/ — utilities like tripwire see no anomaly. File timestamps on the implant binary mimic the system's installation date via utimensat.
+
+The bind shell does something nobody has documented. It opens UDP port 53 with SO_REUSEPORT — the real DNS server keeps handling queries, our shell only processes packets with ZW frame markers. NetFlow shows DNS traffic on port 53 because that's what it is. Nobody has a detection rule for "some DNS packets aren't actually DNS." ICMP and TCP bind shells use the same ZW-encrypted protocol.
+
+Then I found five techniques that have zero MITRE coverage. Not because they're obscure — because nobody has documented using them for malware.
+
+LD_AUDIT is a glibc debugging interface that fires callbacks for every shared library loaded on the system. Completely separate from LD_PRELOAD — different mechanism, different detection surface. Set LD_AUDIT to a malicious .so, and you get a hook that executes before any code runs in any process. No security product monitors LD_AUDIT. I checked every major EDR. Nobody touches it.
+
+fanotify is the kernel API that antivirus software uses to scan files before they open. Register as a listener with FAN_MARK_IGNORED_MASK, and the kernel delivers filesystem events to you before it delivers them to anyone else. Auditd never sees the file access. Splunk never gets the log. The kernel cannot distinguish between AV filtering and malware filtering because they use the exact same API.
+
+eBPF audit suppression loads a sixty-four byte BPF program into the kernel that checks the PID on every audit event. If it matches ours, drop the event. Auditd sees nothing. The program runs in kernel context — completely invisible to userspace. bpftool shows it as a tracing program.
+
+CRIU checkpoint and restore dumps a process's entire state to a file and restores it later. The restored process materializes with no execve call, no parent PID, no audit event. It simply appears. Checkpoint every few minutes. If the implant dies, restore the last checkpoint. It comes back like nothing happened.
+
+systemd generators run at boot and inject units into /run/ — that's tmpfs, never touches disk. Integrity checkers skip tmpfs by default. The units are named systemd-hostnamed and systemd-tmpfiles-clean. They look like they've always been there. ls /etc/systemd/system/ shows nothing.
+
+The framework has an MCP server so AI agents can control it — fifteen tools, four safety tiers. At Tier 0 the AI can only read recon data. At Tier 3 it can generate implants and launch scans. Shell commands require explicit confirmation. There's a GTFOBins catalog with forty-five living-off-the-land techniques. The AI can search and generate commands without knowing binary names.
+
+It bridges with Rustsploit over post-quantum encrypted WebSocket — X25519 plus ML-KEM-768. Share credentials between frameworks. Fire implants as post-exploitation payloads. The scan-to-exploit-to-deploy pipeline is fully automated. ArcticFox finds a target, Rustsploit exploits it, ArcticFox deploys an implant, both frameworks control the same bot.
+
+Everything is tested. Thirty-three agent tests covering stealth, evasion, anti-forensics, payload generation, heartbeat, and all four uncovered techniques. Seventy-two tests across all crates. Zero build errors. Rust 2024 edition. The implant can execute from memory using memfd_create or userfaultfd — the binary never touches disk. There's a self-deleting watchdog with exponential backoff retry. There's domain fronting through every major CDN. There's TLS fingerprint randomization that makes every connection look like a different browser. There are twenty-nine rotating process names and a watchdog that respawns under a completely different name each time.
+
+I built this because the gap between what attackers can do and what defenders can detect keeps widening. Every detection strategy MITRE publishes, there's a bypass. Every forensic artifact, there's a way to hide it. The novel techniques I found aren't in any threat intelligence feed. The bypasses I built work against the actual MITRE detection analytics — not hypotheticals, actual documented strategies with log sources and field mappings.
+
+If you work in threat intelligence, red teaming, or detection engineering — read the docs. There's probably something in here you haven't seen before. If you work on the blue side — now you know what to look for. The detection bypasses are right there in the code. The novel techniques are published. Everything is documented.
+
+Source: github.com/s-b-repo/arcticfox-c3 — ten crates, seventy-two tests, GPL-3.0, Rust 2024.
+
+Stephan Botes — linkedin.com/in/stephan-botes-279106243

@@ -1,0 +1,22 @@
+[package]
+name = "arcticfox-bindshell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArcticFox Bind Shell: multi-protocol ZW-encrypted listener (TCP/UDP/53/ICMP) with SO_REUSEPORT"
+
+[[bin]]
+name = "arcticfox-bindshell"
+path = "src/main.rs"
+
+[dependencies]
+arcticfox-core = { path = "../arcticfox-core" }
+arcticfox-zwtransport = { path = "../arcticfox-zwtransport" }
+tokio.workspace = true
+socket2.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+rand.workspace = true
+libc = "0.2"
+hex.workspace = true
