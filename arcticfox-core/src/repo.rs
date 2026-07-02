@@ -589,7 +589,10 @@ pub fn build_payload(config: &ControlConfig) -> Vec<u8> {
         });
     }
 
-    serde_json::to_vec(&payload).unwrap_or_default()
+    serde_json::to_vec(&payload).unwrap_or_else(|e| {
+        tracing::warn!("build_payload: serialization failed: {e}");
+        vec![]
+    })
 }
 
 // ── Repo Spec Parsing ──────────────────────────────────────────────────────

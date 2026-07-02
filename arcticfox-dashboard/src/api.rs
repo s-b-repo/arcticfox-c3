@@ -78,7 +78,12 @@ impl ApiClient {
             req = req.header("Authorization", &self.auth_header());
         }
         let resp = req.send().await.map_err(|e| format!("HTTP error: {e}"))?;
+        let status = resp.status();
         let json: Value = resp.json().await.map_err(|e| format!("JSON error: {e}"))?;
+        if !status.is_success() {
+            let msg = json["error"].as_str().unwrap_or("unknown error");
+            return Err(format!("API {} ({}): {}", status.as_u16(), path, msg));
+        }
         Ok(json)
     }
 
@@ -89,7 +94,12 @@ impl ApiClient {
             req = req.header("Authorization", &self.auth_header());
         }
         let resp = req.send().await.map_err(|e| format!("HTTP error: {e}"))?;
+        let status = resp.status();
         let json: Value = resp.json().await.map_err(|e| format!("JSON error: {e}"))?;
+        if !status.is_success() {
+            let msg = json["error"].as_str().unwrap_or("unknown error");
+            return Err(format!("API {} ({}): {}", status.as_u16(), path, msg));
+        }
         Ok(json)
     }
 
@@ -100,7 +110,12 @@ impl ApiClient {
             req = req.header("Authorization", &self.auth_header());
         }
         let resp = req.send().await.map_err(|e| format!("HTTP error: {e}"))?;
+        let status = resp.status();
         let json: Value = resp.json().await.map_err(|e| format!("JSON error: {e}"))?;
+        if !status.is_success() {
+            let msg = json["error"].as_str().unwrap_or("unknown error");
+            return Err(format!("API {} ({}): {}", status.as_u16(), path, msg));
+        }
         Ok(json)
     }
 
@@ -111,7 +126,12 @@ impl ApiClient {
             req = req.header("Authorization", &self.auth_header());
         }
         let resp = req.send().await.map_err(|e| format!("HTTP error: {e}"))?;
+        let status = resp.status();
         let json: Value = resp.json().await.map_err(|e| format!("JSON error: {e}"))?;
+        if !status.is_success() {
+            let msg = json["error"].as_str().unwrap_or("unknown error");
+            return Err(format!("API {} ({}): {}", status.as_u16(), path, msg));
+        }
         Ok(json)
     }
 

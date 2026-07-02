@@ -218,6 +218,7 @@ impl ZmapIpIterator {
     /// Create a new iterator for shard `shard_id` of `total_shards`.
     /// shard_id is 1-based.
     fn new(shard_id: usize, total_shards: usize, exclude_bogon: bool) -> Self {
+        assert!(total_shards > 0, "total_shards must be > 0");
         let shard_size = ZMAP_PRIME / total_shards as u64;
         let shard_start = (shard_id - 1) as u64 * shard_size;
         let shard_end = if shard_id == total_shards {

@@ -601,9 +601,9 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, tier: SafetyTier) -> R
         }
         "check_repos" => {
             tier_check(tier, SafetyTier::Tier1)?;
-            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+            let handle = tokio::runtime::Handle::current();
             let mut repos = config.repos.clone();
-            let results = rt.block_on(async {
+            let results = handle.block_on(async {
                 repo::check_all_repos(&mut repos, &client).await
             });
             let results_json: Vec<serde_json::Value> = results.iter().map(|(label, alive)| {
@@ -631,16 +631,18 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, tier: SafetyTier) -> R
             tier_check(tier, SafetyTier::Tier2)?;
             let pad = args["pad"].as_bool().unwrap_or(false);
             let payload = repo::build_payload(&config);
-            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+            let handle = tokio::runtime::Handle::current();
             let alive: Vec<_> = config.repos.iter().filter(|r| r.alive).collect();
             if alive.is_empty() {
                 return Err("No alive repos. Run check_repos first.".into());
             }
-            let results: Vec<serde_json::Value> = rt.block_on(async {
+            let results: Vec<serde_json::Value> = handle.block_on(async {
                 let mut res = Vec::new();
                 for r in alive {
-                    let ok = repo::push_to_repo(r, &config, &payload, pad, &client).await;
-                    res.push(serde_json::json!({"label": r.label(), "success": ok.is_ok()}));
+                    match repo::push_to_repo(r, &config, &payload, pad, &client).await {
+                        Ok(success) => res.push(serde_json::json!({"label": r.label(), "success": success})),
+                        Err(e) => res.push(serde_json::json!({"label": r.label(), "success": false, "error": e.to_string()})),
+                    }
                 }
                 res
             });
@@ -666,8 +668,8 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, tier: SafetyTier) -> R
             let content = "# Notes\n\nMiscellaneous.\n";
             let injected = arcticfox_core::zwcodec::inject(content, &payload, false)
                 .map_err(|e| format!("ZW inject error: {e}"))?;
-            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-            let paste_id = rt.block_on(async { repo::DebianPaste::create(&injected, &client).await })
+            let handle = tokio::runtime::Handle::current();
+            let paste_id = handle.block_on(async { repo::DebianPaste::create(&injected, &client).await })
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::json!({"paste_id": paste_id, "url": format!("https://paste.debian.net/{}", paste_id)}))
         }

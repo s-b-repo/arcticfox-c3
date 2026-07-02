@@ -267,9 +267,10 @@ pub fn tamper_timestamps(path: &str) -> io::Result<()> {
     // Find the oldest timestamp in /etc/ for reference
     let ref_time = find_oldest_etc_timestamp().unwrap_or(1_600_000_000); // ~2020
 
-    let path_c = std::ffi::CString::new(path).unwrap_or_default();
+    let path_c = std::ffi::CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains interior null byte"))?;
     let times = [libc::timespec {
-        tv_sec: ref_time - rand::random::<i64>().abs() % 86_400, // random time within 24h of ref
+        tv_sec: ref_time - (rand::random::<i64>().wrapping_abs() as u64 % 86_400) as i64, // random time within 24h of ref
         tv_nsec: 0,
     }; 2];
 
