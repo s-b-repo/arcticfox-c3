@@ -1,104 +1,61 @@
 # Changelog
 
-## [3.1.0] - 2026-05-08
+## v4.0.0 (July 2026) — Rust Rewrite & Unified Dashboard
 
-### Security Fixes
-- **Timing attack on API tokens** — `api.py` token comparison now uses `hmac.compare_digest()` instead of `==` to prevent byte-by-byte timing oracle attacks
-- **HTML injection in `popmsg`** — `pop_message()` now HTML-escapes input via `html.escape()` before writing to tempfile
-- **Shell injection in `dos` command** — switched from `shell=True` string interpolation to `subprocess.Popen` with argument list
-- **Debug mode exposure** — `api.py --debug` on non-localhost is now forced to `127.0.0.1` to prevent Werkzeug debugger RCE
-- **Plaintext token configs excluded from git** — added `api_config.json`, `control_config.json`, `pb_config.json` to `.gitignore`
-- **Atomic bot persistence** — `_save_bots()` now writes to a `.tmp` file and uses `os.replace()` for crash-safe updates
+### Breaking Changes
+- **Pure Rust**: All Python code removed. `control.py`, `api.py`, `pastebomb.py`, `oogascan.py`, `zwenc.py` replaced by Rust equivalents.
+- **New binary**: `c3` unified TUI dashboard replaces the old Python control tool.
+- **Config format**: `pb_config.json` and `oogascan.json` retired. Use `agent_config.json` for agent config.
+
+### New Features
+- **`c3` Dashboard**: 8-tab terminal UI (Bots, Repos, Commands, Attack Studio, Scanner, Implants, Config, Stats). Ratatui-based with color-coded status, keyboard navigation, and live auto-refresh.
+- **Session-derived ZW markers**: Zero-width payload delimiters now randomized per session via HKDF from the session key. Prevents static fingerprinting of payload markers.
+- **HKDF key derivation**: Replaced custom iterative HMAC with standard `ring::hkdf::HKDF_SHA256`.
+- **Encrypt-then-ZW everywhere**: `seal_oneshot()`/`open_oneshot()` now wired into heartbeat, exfiltration, commit messages, and HTTP headers. Dead code from `arcticfox-zwtransport` now in production use.
+- **Anti-analysis module**: Debugger detection (ptrace/TracerPid), VM detection (DMI/CPUID/systemd-detect-virt), sandbox detection (RAM/home/uptime), timing anomaly detection. Configurable via env vars.
+- **Anti-forensics**: `/proc/pid/exe` spoofing, FD camouflage, timestamp tampering, systemd child lineage spoofing. Wired into agent startup.
+- **Bot ID persistence**: Agent stores bot_id in `/tmp/.sd-id` across restarts.
+- **Heartbeat ZW commands**: Agents can now receive encrypted commands via heartbeat response body. Session key delivered through dead-drop payloads.
+- **Upload/exfil commands**: New `upload` and `exfil` agent commands with ZW-encrypted data transfer.
+- **ICMP heartbeat**: Alternative covert channel using ICMP timestamp (type 13/14) with ZW-encrypted payloads.
+- **Log covert channel**: Inter-agent communication via shared system log files with ZW-encoded messages.
+- **ZW in HTTP headers**: User-Agent and X-Cache-Breaker headers carry ZW-encoded data invisibly.
+- **ZW in commit messages**: Git commit messages can carry ZW-encoded data via `zw_commit_msg()`.
+- **ZW in process arguments**: Watchdog passes config path as ZW-encoded suffix in `--name` argument.
+- **Per-session key rotation**: `set_key` command updates session key and marker sets atomically.
+- **B64 command parser**: Legacy Python `pastebomb.py` command format compatibility in Rust agent.
+- **Scanner enhancements**: Bogon/martian IP filtering, zmap stateless scanning, sharding, rate limiting.
+- **Config at-rest protection**: All token fields ZW-encoded before writing to disk.
+- **Daemon mode**: Double-fork + setsid + fd redirect for proper background execution.
+- **Argnames shortened**: `--stealth-name` → `--name`, `--parent-pid` → `--ppid`. Repos removed from CLI args (config-only).
+- **Crate descriptions de-branded**: All `Cargo.toml` descriptions replaced with innocuous text.
 
 ### Bug Fixes
-- **Backoff logic for dead repos** — repos that never succeeded had `fail_count` reset every cycle due to `last_success=0.0` always passing the time check. Added `last_fail` field to `RepoSource`; backoff now uses last failure timestamp and no longer resets `fail_count` on retry
-- **Double HTTP request per poll** — removed redundant `_check_404()` HEAD pre-check from `fetch_with_fallback()`; the GET fetch itself handles failures
-- **Negative index in control shell** — `rm`, `push`, and `pull` commands now reject `idx < 0` instead of silently operating on the wrong element via Python's negative indexing
-- **Credential sharding overflow** — brute worker count now capped to `min(threads, len(creds))` to prevent workers with empty shards falling back to the full credential list
-- **Deferred API config loading** — `api.py` no longer loads configs and writes `api_config.json` at import time; initialization deferred to `_init_app()` via `@app.before_request`
-- **Daemon stdin redirect** — `daemonize()` now redirects stdin to `/dev/null` alongside stdout/stderr, preventing hangs on accidental reads
-- **Bot ID lookup efficiency** — `_get_bot_id()` now checks the 3 deterministic `_id_paths()` first before falling back to the full 90-path brute-force search
-- **ZW decode truncation** — `zwenc.decode()` now uses explicit `usable = len - len%4` truncation instead of the ambiguous `range(0, len-3, 4)`
-- **Command deduplication** — `extract_commands()` now deduplicates commands found across marker-tag, code-block, and base64 formats
-- **Temp file cleanup** — `pop_message()` schedules file deletion after 30 seconds via `threading.Timer`
-- **Heartbeat write throttle** — heartbeat receiver now writes `bots.json` at most every 10 seconds instead of on every check-in
-- **`dos` command signature** — removed unused `port` parameter; command now takes `dos <ip> <seconds>`
-- **`--random` flag** — removed `default=True` which made the flag always active regardless of user intent
-- **`total_hosts()` exclude overlap** — scope host count now subtracts addresses in exclude ranges and RFC-reserved blocks
-- **`load_creds_file` safety** — returns empty list instead of crashing with `FileNotFoundError` when file is missing
-- **HTTP cleartext warning** — API startup banner now warns that tokens are transmitted in cleartext without TLS
-
-### Added
-- **`genzw` command in server shell** — generates README with zero-width encoded payload (preferred format); `genzw pad` adds 1MB ZW padding
-- **`rm_cmd` command in control shell** — remove individual commands by index instead of clearing all
-- **`status` command in control shell** — quick summary showing repo count, command count, heartbeat and token status
-- **Type annotations** — `PBConfig.repos`, `ControlConfig.repos`, `ControlConfig.commands`, `load_creds_file` return type now properly annotated
-- **Python 3.10+ version check** — `oogascan.py` exits with clear error on older Python versions
-
-## [3.0.0] - 2026-05-04
-
-### Added
-- **Zero-width Unicode C2 protocol** — commands encoded invisibly in README files
-- **Operator control tool** (`control.py`) — interactive shell for managing dead-drops
-- **Debian paste support** (`dp:paste_id` prefix) — paste.debian.net as additional dead-drop
-- **1MB ZW padding** — optional 1MB of random zero-width noise after payload (`--pad` / `pad` toggle)
-- **Cron job persistence** — re-runs agent every 2 weeks if killed (disguised cron entry)
-- **Bot ID camouflage** — stored in hidden files named after top 10 Linux tools (systemd, cron, bash, sshd, etc.)
-- **Randomized padded bot hash** — random prefix added to bot hash before each heartbeat
-- **Async parallel honeypot detection** — if 11+ ports open on target, skip as honeypot
-- **Batch honeypot scanning** — async checks multiple IPs in parallel before deployment
-- **Heartbeat via open redirect** — URL-encoded tracking endpoint through redirect server
-- **Dynamic repo discovery** — agent learns new GitHub/GitLab/Debian sources from payload
-- **404 pre-check with random failover** — HEAD check before fetch, randomized repo order
-- `zwenc.py` — zero-width Unicode codec module (encode/decode/inject/extract/pad)
-- `control.py` — operator tool with GitHub/GitLab/Debian API push
-
-### Changed
-- Agent now prioritizes zero-width encoded payloads over legacy marker tags
-- Failover order is randomized each poll cycle (not sequential)
-- `deploy_from_file` runs async batch honeypot scan before deploying
-- `install_persistence` now installs both autostart symlink and cron job on Linux
-- Heartbeat sends padded hash (random prefix + SHA256) instead of raw bot ID
-
-## [2.0.0] - 2026-05-04
-
-### Added
-- GitLab dead-drop support (`gl:owner/repo` prefix)
-- Mix-and-match GitHub + GitLab repos with automatic fallback
-- `deploy` mode in pastebomb — push agent to telnet targets via brute-forced credentials
-- `--daemon` flag for background agent operation
-- Platform field in repo config (`"platform": "github"` or `"gitlab"`)
-- GitLab raw URL and API fetching
+- **Broken exponential backoff**: Agent backoff calculation mixed `Instant` (monotonic) with epoch timestamps, causing repos to never be rate-limited. Fixed to use chrono timestamps consistently.
+- **Fisher-Yates shuffle**: Range `(1..n).rev()` skipped index 0. Fixed to `(0..n).rev()`.
+- **ZW inject last-line duplication**: `inject()` duplicated the last line when no heading found. Fixed.
+- **io_uring mmap check**: Failure check only triggered if ALL three mmaps failed. Now validates each independently with proper cleanup.
+- **save_bots path**: API server saved bots to hardcoded `bots.json` ignoring `--bots-file` CLI arg. Fixed.
+- **GitHub auth prefix**: Deprecated `token` scheme → `Bearer`.
+- **Bindshell key panic**: Added length validation before `copy_from_slice`.
+- **Zero-nonce vulnerability**: Heartbeat response decryption used all-zero nonce. Fixed to derive from response hash.
+- **Accept header overwrite**: Browser-mimic headers overwrote GitHub's required Accept header. Fixed.
+- **TOCTOU in save_bots**: Concurrent saves could corrupt bots.json. Fixed with atomic timestamp check.
+- **Python padding bug**: `zwenc.py` used `// 3` instead of `* 4`, producing 1/12th intended ZW padding.
+- **Crypto KDF**: Replaced non-standard iterative HMAC construction with ring HKDF.
+- **Hex decode silent fail**: `secure_hash_eq` returned true for invalid hex. Fixed to reject malformed input.
 
 ### Removed
-- ICMP-based C2 server (`c2.py`) — deleted
-- ICMP-based agent (`agent.py`) — deleted
-- `C2Config` class from shared config
-- All raw socket / ICMP dependencies
+- All Python scripts (`control.py`, `api.py`, `pastebomb.py`, `oogascan.py`, `zwenc.py`)
+- `requirements.txt`, `pb_config.json`, `oogascan.json`
+- `--repo` CLI argument (repos now config-file-only)
+- Static ZW markers (replaced by session-derived markers)
+- Hardcoded `ArcticFox-C3/4.0` user-agent (replaced by randomized pool)
+- Duplicate `BLAND_COMMITS` and `random_commit_msg` in control tool
+- Duplicate `random_user_agent()` between fetcher and repo (consolidated)
 
-### Changed
-- C2 architecture now exclusively uses GitHub/GitLab README dead-drops
-- `pastebomb.py` is now the sole C2 module (agent, server, deployer)
-- `oogascan.py` entry point updated — `c2` subcommand routes to pastebomb
-- `oogascan.json` simplified (removed ICMP C2 section)
-- `pb_config.json` now includes `platform` field per repo
+## v3.1.0 (May 2026)
 
-### Preserved
-- Full telnet scanner & brute-forcer (`csan.py`)
-- CVE-2026-24061 auth bypass
-- Honeypot detection
-- All command types (shell, download, dos, popmsg, add_repo, set_interval, sleep, die)
-- Cross-platform persistence (Windows, Linux, macOS)
-- Multiple command encodings (marker tags, code blocks, base64)
-- Exponential backoff on repo failures
-- Telnet deployment to compromised targets
+### Previous Changelog
 
-## [1.0.0] - 2026-04-20
-
-### Initial release
-- ICMP-based C2 server and agent
-- Telnet scanner & brute-forcer
-- GitHub README dead-drop C2 (PasteBomb)
-- Common credential list
-- Honeypot detection
-- CVE-2026-24061 auth bypass
+*(Earlier versions retained from original project. See git history for details.)*
