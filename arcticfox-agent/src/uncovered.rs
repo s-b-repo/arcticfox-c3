@@ -144,6 +144,7 @@ unsigned int la_activity(uintptr_t *cookie, unsigned int flag) {{
 
 /// Constants for fanotify (from linux/fanotify.h)
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 mod fanotify_consts {
     pub const FAN_MARK_ADD: u32 = 1;
     pub const FAN_MARK_MOUNT: u32 = 0x10;

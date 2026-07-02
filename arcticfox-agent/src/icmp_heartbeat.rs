@@ -15,6 +15,7 @@ use std::net::Ipv4Addr;
 use tracing::{debug, warn};
 
 const ICMP_TSTAMP_TYPE: u8 = 13;
+#[allow(dead_code)]
 const ICMP_TSTAMP_REPLY: u8 = 14;
 
 #[cfg(target_os = "linux")]

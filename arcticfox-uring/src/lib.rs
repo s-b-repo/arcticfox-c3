@@ -18,7 +18,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use tracing::{debug, error, info, warn};
+use tracing::warn;
 
 use arcticfox_core::crypto::SESSION_KEY_LEN;
 use arcticfox_zwtransport::ZwSession;

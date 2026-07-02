@@ -142,6 +142,28 @@ pub async fn handle_key(key: KeyCode, state: &mut RepoTabState, api: &ApiClient,
                 Err(e) => *status = format!("Error: {e}"),
             }
         }
+        KeyCode::Char('p') => {
+            match api.create_paste().await {
+                Ok(v) => {
+                    let id = v["paste_id"].as_str().unwrap_or("?");
+                    *status = format!("Created paste: {id}");
+                    match api.list_repos().await {
+                        Ok(repos) => state.repos = repos,
+                        Err(_) => {}
+                    }
+                }
+                Err(e) => *status = format!("Error: {e}"),
+            }
+        }
+        KeyCode::Char('v') => {
+            if !state.repos.is_empty() {
+                let idx = state.selected;
+                match api.pull(idx).await {
+                    Ok(v) => { *status = format!("Payload: {:.200}", v); }
+                    Err(e) => *status = format!("Error: {e}"),
+                }
+            }
+        }
         _ => {}
     }
 }
