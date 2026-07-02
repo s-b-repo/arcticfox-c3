@@ -303,7 +303,7 @@ impl TlsFingerprint {
         let mut rng = rand::thread_rng();
 
         // Pick a random browser profile
-        let profile: usize = rng.r#gen_range(0..4);
+            let profile: usize = rng.gen_range(0..4);
 
         match profile {
             0 => TlsFingerprint {

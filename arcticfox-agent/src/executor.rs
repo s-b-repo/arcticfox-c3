@@ -86,11 +86,12 @@ async fn execute_shell(cmd: &str) -> Result<String> {
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .kill_on_drop(true)
-        .output()
-        .await;
+        .output();
+
+    let output = tokio::time::timeout(Duration::from_secs(60), output).await;
 
     match output {
-        Ok(out) => {
+        Ok(Ok(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             
@@ -107,6 +108,10 @@ async fn execute_shell(cmd: &str) -> Result<String> {
             } else {
                 Ok(combined)
             }
+        }
+        Ok(Err(e)) => {
+            warn!("Shell execution timed out: {e}");
+            Ok(format!("[timeout: {}]", e))
         }
         Err(e) => {
             error!("Shell execution failed: {e}");
@@ -357,14 +362,24 @@ async fn execute_serialkiller(args: &str) -> Result<String> {
     let cmds = SerialKiller::generate_kill_commands(aggressive);
     let mut output = String::new();
     for cmd in cmds.split('\n').filter(|s| !s.is_empty()) {
-        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).output();
-        output.push_str(&format!("[ok] {cmd}\n"));
+        match tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await {
+            Ok(o) => {
+                let status = if o.status.success() { "ok" } else { "err" };
+                output.push_str(&format!("[{status}] {cmd} (exit {})\n", o.status.code().unwrap_or(-1)));
+            }
+            Err(e) => output.push_str(&format!("[err] {cmd}: {e}\n")),
+        }
     }
     if aggressive {
         let port_cmds = SerialKiller::generate_port_block_commands();
         for cmd in port_cmds.split('\n').filter(|s| !s.is_empty()) {
-            let _ = std::process::Command::new("sh").arg("-c").arg(cmd).output();
-            output.push_str(&format!("[ok] {cmd}\n"));
+            match tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await {
+                Ok(o) => {
+                    let status = if o.status.success() { "ok" } else { "err" };
+                    output.push_str(&format!("[{status}] {cmd} (exit {})\n", o.status.code().unwrap_or(-1)));
+                }
+                Err(e) => output.push_str(&format!("[err] {cmd}: {e}\n")),
+            }
         }
     }
     Ok(output)

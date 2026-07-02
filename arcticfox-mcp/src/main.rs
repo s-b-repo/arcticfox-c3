@@ -503,6 +503,9 @@ async fn handle_http(
 }
 
 fn handle_request(req: &McpRequest, tools: &[&ToolDef], tier: SafetyTier) -> McpResponse {
+    if req.jsonrpc != "2.0" {
+        return error_response(req.id.clone(), -32600, "Invalid Request: jsonrpc must be '2.0'");
+    }
     match req.method.as_str() {
         "tools/list" => {
             let tool_list: Vec<serde_json::Value> = tools

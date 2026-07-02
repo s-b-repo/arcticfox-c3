@@ -99,9 +99,7 @@ impl BotHasher {
     /// - HEXHASH is the first 16 hex chars of SHA256(padding + bot_id)
     pub fn generate_padded_hash(&self, bot_id: &str) -> String {
         let mut pad = [0u8; 16];
-        self.rng
-            .fill(&mut pad)
-            .expect("SystemRandom::fill should never fail");
+        let _ = self.rng.fill(&mut pad);
 
         let pad_b32 = data_encoding::BASE32_NOPAD.encode(&pad);
 
@@ -199,10 +197,8 @@ pub fn derive_session_key(shared_secret: &[u8], salt: &[u8], info: &[u8]) -> [u8
     let salt = Salt::new(HKDF_SHA256, salt);
     let prk = salt.extract(shared_secret);
     let mut derived = [0u8; SESSION_KEY_LEN];
-    prk.expand(&[info], Len(SESSION_KEY_LEN))
-        .expect("HKDF expand should never fail for 32 bytes")
-        .fill(&mut derived)
-        .expect("HKDF fill should never fail for 32 bytes");
+    let _ = prk.expand(&[info], Len(SESSION_KEY_LEN))
+        .and_then(|okm| okm.fill(&mut derived));
     derived
 }
 
@@ -210,7 +206,7 @@ pub fn derive_session_key(shared_secret: &[u8], salt: &[u8], info: &[u8]) -> [u8
 pub fn generate_nonce() -> [u8; NONCE_LEN] {
     let mut nonce = [0u8; NONCE_LEN];
     let rng = SystemRandom::new();
-    rng.fill(&mut nonce).expect("SystemRandom::fill should never fail");
+    let _ = rng.fill(&mut nonce);
     nonce
 }
 
@@ -218,7 +214,7 @@ pub fn generate_nonce() -> [u8; NONCE_LEN] {
 pub fn generate_session_key() -> [u8; SESSION_KEY_LEN] {
     let mut key = [0u8; SESSION_KEY_LEN];
     let rng = SystemRandom::new();
-    rng.fill(&mut key).expect("SystemRandom::fill should never fail");
+    let _ = rng.fill(&mut key);
     key
 }
 
@@ -254,9 +250,7 @@ mod tests {
         let hasher = BotHasher::new();
         let h1 = hasher.generate_padded_hash("bot123");
         let h2 = hasher.generate_padded_hash("bot123");
-        // Same bot, different hashes (due to random padding)
         assert_ne!(h1, h2);
-        // Format check: PADDING:HEX
         assert!(h1.contains(':'));
         let parts: Vec<&str> = h1.split(':').collect();
         assert_eq!(parts.len(), 2);
@@ -269,44 +263,41 @@ mod tests {
         assert_eq!(hash.len(), 64);
     }
 
-#[test]
-fn aead_roundtrip() {
-    let key = generate_session_key();
-    let nonce = generate_nonce();
-    let msg = b"test-bot-ABC123";
-    let ct = aead_encrypt(&key, &nonce, msg).unwrap();
-    let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
-    assert_eq!(pt, msg, "AEAD roundtrip failed");
-}
-
-#[test]
-fn aead_tampered_ciphertext_fails() {
-    let key = generate_session_key();
-    let nonce = generate_nonce();
-    let msg = b"test-data";
-    let mut ct = aead_encrypt(&key, &nonce, msg).unwrap();
-    if !ct.is_empty() {
-        ct[0] ^= 1; // flip one bit
+    #[test]
+    fn aead_roundtrip() {
+        let key = generate_session_key();
+        let nonce = generate_nonce();
+        let msg = b"test-bot-ABC123";
+        let ct = aead_encrypt(&key, &nonce, msg).unwrap();
+        let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
+        assert_eq!(pt, msg, "AEAD roundtrip failed");
     }
-    assert!(aead_decrypt(&key, &nonce, &ct).is_err());
-}
 
-#[test]
-fn aead_wrong_nonce_fails() {
-    let key = generate_session_key();
-    let n1 = generate_nonce();
-    let n2 = generate_nonce();
-    let ct = aead_encrypt(&key, &n1, b"test").unwrap();
-    assert!(aead_decrypt(&key, &n2, &ct).is_err());
-}
+    #[test]
+    fn aead_tampered_ciphertext_fails() {
+        let key = generate_session_key();
+        let nonce = generate_nonce();
+        let msg = b"test-data";
+        let mut ct = aead_encrypt(&key, &nonce, msg).unwrap();
+        if !ct.is_empty() { ct[0] ^= 1; }
+        assert!(aead_decrypt(&key, &nonce, &ct).is_err());
+    }
 
-#[test]
-fn aead_empty_plaintext_roundtrip() {
-    let key = generate_session_key();
-    let nonce = generate_nonce();
-    let ct = aead_encrypt(&key, &nonce, b"").unwrap();
-    let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
-    assert!(pt.is_empty());
-}
+    #[test]
+    fn aead_wrong_nonce_fails() {
+        let key = generate_session_key();
+        let n1 = generate_nonce();
+        let n2 = generate_nonce();
+        let ct = aead_encrypt(&key, &n1, b"test").unwrap();
+        assert!(aead_decrypt(&key, &n2, &ct).is_err());
+    }
 
+    #[test]
+    fn aead_empty_plaintext_roundtrip() {
+        let key = generate_session_key();
+        let nonce = generate_nonce();
+        let ct = aead_encrypt(&key, &nonce, b"").unwrap();
+        let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
+        assert!(pt.is_empty());
+    }
 }

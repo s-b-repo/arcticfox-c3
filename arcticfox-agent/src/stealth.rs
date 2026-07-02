@@ -320,12 +320,15 @@ pub fn self_delete() {
 }
 
 /// Unlink the binary so it disappears from `ls` but keeps running.
-/// Uses `unlink` syscall — the inode stays alive until the process exits.
+/// Resolves /proc/self/exe symlink before unlinking the real path.
 #[cfg(target_os = "linux")]
 pub fn unlink_self() {
-    unsafe {
-        let path = b"/proc/self/exe\0";
-        libc::unlink(path.as_ptr() as *const libc::c_char);
+    if let Ok(exe) = std::env::current_exe() {
+        unsafe { libc::unlink(
+            std::ffi::CString::new(exe.to_string_lossy().as_bytes())
+                .unwrap_or_default()
+                .as_ptr()
+        ); }
     }
 }
 

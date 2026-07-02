@@ -38,7 +38,13 @@ async fn main() {
         .init();
 
     let session_key = if let Some(hex_key) = &cli.key {
-        let bytes = hex::decode(hex_key).expect("Invalid hex key — must be 64 hex chars");
+        let bytes = match hex::decode(hex_key) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Invalid hex key: {e}");
+                std::process::exit(1);
+            }
+        };
         if bytes.len() != 32 {
             tracing::error!("Session key must be 32 bytes (64 hex chars), got {} bytes", bytes.len());
             std::process::exit(1);

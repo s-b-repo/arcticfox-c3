@@ -37,8 +37,6 @@ const GENERATOR_PATHS: &[&str] = &[
 const GENERATOR_OUTPUT: &str = "/run/systemd/generator";
 
 /// Where generated units appear with a different name.
-const GENERATOR_OUTPUT_EARLY: &str = "/run/systemd/generator.early";
-const GENERATOR_OUTPUT_LATE: &str = "/run/systemd/generator.late";
 
 // ── Unit Generation ─────────────────────────────────────────────────────────
 
