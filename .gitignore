@@ -23,5 +23,14 @@ Thumbs.db
 *.key
 *secret*
 
+# Runtime configs — contain live tokens, never commit
+control_config.json
+api_config.json
+pb_config.json
+bots.json
+
+# Scan artifacts
+reflect
+
 # Hermes
 .hermes/
