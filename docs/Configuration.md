@@ -100,6 +100,10 @@ Agent runtime configuration.
 | `max_fails_before_skip` | u32 | `5` | Consecutive failures before backoff |
 | `use_api` | bool | `false` | Use API instead of raw URLs |
 | `last_command_hash` | String | `""` | SHA-256 of last executed command batch |
+| `icmp_heartbeat_dest` | String | `"8.8.8.8"` | ICMP timestamp heartbeat destination IP |
+| `icmp_heartbeat_interval` | u64 | `300` | Seconds between ICMP heartbeats |
+| `log_covert_path` | String | `"/var/log/auth.log"` | Log file for covert inter-agent communication |
+| `log_covert_interval` | u64 | `600` | Seconds between log covert writes |
 
 ## bots.json
 
