@@ -205,8 +205,23 @@ mod raw_uring {
                 )
             };
 
-            if sq_ptr == libc::MAP_FAILED || cq_ptr == libc::MAP_FAILED || sqes_ptr == libc::MAP_FAILED
-            {
+            if sq_ptr == libc::MAP_FAILED {
+                unsafe { let _ = libc::close(ring_fd); }
+                return Err(io::Error::last_os_error());
+            }
+            if cq_ptr == libc::MAP_FAILED {
+                unsafe {
+                    libc::munmap(sq_ptr as *mut libc::c_void, sq_ring_size);
+                    let _ = libc::close(ring_fd);
+                }
+                return Err(io::Error::last_os_error());
+            }
+            if sqes_ptr == libc::MAP_FAILED {
+                unsafe {
+                    libc::munmap(sq_ptr as *mut libc::c_void, sq_ring_size);
+                    libc::munmap(cq_ptr as *mut libc::c_void, cq_ring_size);
+                    let _ = libc::close(ring_fd);
+                }
                 return Err(io::Error::last_os_error());
             }
 

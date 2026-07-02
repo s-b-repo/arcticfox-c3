@@ -3,7 +3,7 @@ name = "arcticfox-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox C3 Control: operator CLI for managing dead-drop repos"
+description = "Interactive CLI management tool"
 
 [[bin]]
 name = "arcticfox-control"

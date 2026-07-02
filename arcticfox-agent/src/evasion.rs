@@ -11,7 +11,7 @@
 //! - Busybox applet chaining (hundreds of LOLBins in one binary)
 
 use std::io;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // ── Systemd Drop-In Override ────────────────────────────────────────────────
 
@@ -254,7 +254,7 @@ fn icmp_checksum(data: &[u8]) -> u16 {
 pub fn patch_got_entry(
     target_pid: u32,
     symbol_name: &str,
-    hook_address: usize,
+    _hook_address: usize,
 ) -> io::Result<()> {
     // Attach to process
     unsafe {
@@ -282,14 +282,11 @@ pub fn patch_got_entry(
 
     // Open /proc/pid/mem for writing
     let mem_path = format!("/proc/{}/mem", target_pid);
-    let mem_file = std::fs::OpenOptions::new()
+    let _mem_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&mem_path)?;
 
-    // Write hook address to GOT entry (simplified — real impl resolves GOT offset)
-    use std::io::{Seek, SeekFrom, Write};
-    let mut file = &mem_file;
     // In a real implementation, we'd:
     // 1. Parse ELF to find .got.plt section
     // 2. Find the specific symbol's GOT entry

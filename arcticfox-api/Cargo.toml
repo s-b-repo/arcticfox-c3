@@ -3,7 +3,7 @@ name = "arcticfox-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox C3 API: REST server for admin & lints dashboards"
+description = "REST API server with token auth"
 
 [[bin]]
 name = "arcticfox-api"

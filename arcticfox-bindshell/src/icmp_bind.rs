@@ -5,7 +5,7 @@
 //! Responses are ICMP echo replies with ZW-encoded encrypted output.
 
 use std::os::fd::AsRawFd;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 const ICMP_HDR_LEN: usize = 8;
 const MAX_ICMP: usize = 1500;

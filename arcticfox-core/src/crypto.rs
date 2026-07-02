@@ -127,8 +127,14 @@ pub fn secure_hash_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let a_bytes = hex::decode(a).unwrap_or_default();
-    let b_bytes = hex::decode(b).unwrap_or_default();
+    let a_bytes = match hex::decode(a) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let b_bytes = match hex::decode(b) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     constant_time_eq(&a_bytes, &b_bytes)
 }
 
@@ -172,7 +178,7 @@ pub fn aead_decrypt(key: &[u8; SESSION_KEY_LEN], nonce: &[u8; NONCE_LEN], cipher
     let nonce = Nonce::assume_unique_for_key(*nonce);
 
     let mut in_out = ciphertext.to_vec();
-    let plaintext_slice = key.open_in_place(nonce, Aad::empty(), &mut in_out)
+    let _plaintext_slice = key.open_in_place(nonce, Aad::empty(), &mut in_out)
         .map_err(|_| crate::error::ArcticFoxError::Internal { message: "AEAD decrypt failed — wrong key or corrupted data".into() })?;
 
     // Return exactly the plaintext (open_in_place returns full buffer with zeroed tag;
@@ -181,22 +187,22 @@ pub fn aead_decrypt(key: &[u8; SESSION_KEY_LEN], nonce: &[u8; NONCE_LEN], cipher
     Ok(in_out[..pt_len].to_vec())
 }
 
-/// Derive a session key from a shared secret using HMAC-SHA256(KDF).
+/// Derive a session key from a shared secret using HKDF-SHA256.
 pub fn derive_session_key(shared_secret: &[u8], salt: &[u8], info: &[u8]) -> [u8; SESSION_KEY_LEN] {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, salt);
-    let mut tag = hmac::sign(&key, shared_secret);
-    let mut derived = [0u8; SESSION_KEY_LEN];
-    // Simple iterative KDF using HMAC
-    let mut data = Vec::with_capacity(info.len() + 4);
-    data.extend_from_slice(info);
-    for i in 0..4u32 {
-        data.truncate(info.len());
-        data.extend_from_slice(&i.to_be_bytes());
-        tag = hmac::sign(&key, &data);
-        let start = (i as usize * 8) % 32;
-        let end = ((i as usize + 1) * 8).min(32);
-        derived[start..end].copy_from_slice(&tag.as_ref()[..end - start]);
+    use ring::hkdf::{Salt, HKDF_SHA256, KeyType};
+
+    struct Len(usize);
+    impl KeyType for Len {
+        fn len(&self) -> usize { self.0 }
     }
+
+    let salt = Salt::new(HKDF_SHA256, salt);
+    let prk = salt.extract(shared_secret);
+    let mut derived = [0u8; SESSION_KEY_LEN];
+    prk.expand(&[info], Len(SESSION_KEY_LEN))
+        .expect("HKDF expand should never fail for 32 bytes")
+        .fill(&mut derived)
+        .expect("HKDF fill should never fail for 32 bytes");
     derived
 }
 
@@ -263,22 +269,44 @@ mod tests {
         assert_eq!(hash.len(), 64);
     }
 
-#[cfg(test)]
-mod aead_debug {
-    use super::*;
+#[test]
+fn aead_roundtrip() {
+    let key = generate_session_key();
+    let nonce = generate_nonce();
+    let msg = b"test-bot-ABC123";
+    let ct = aead_encrypt(&key, &nonce, msg).unwrap();
+    let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
+    assert_eq!(pt, msg, "AEAD roundtrip failed");
+}
 
-    #[test]
-    fn aead_debug_len() {
-        let key = generate_session_key();
-        let nonce = generate_nonce();
-        let msg = b"test-bot-ABC123";
-        let ct = aead_encrypt(&key, &nonce, msg).unwrap();
-        eprintln!("DEBUG encrypt: msg_len={}, ct_len={}", msg.len(), ct.len());
-        let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
-        eprintln!("DEBUG decrypt: pt_len={}, pt={:?}", pt.len(), String::from_utf8_lossy(&pt));
-        eprintln!("DEBUG expected: {}", String::from_utf8_lossy(msg));
-        assert_eq!(pt, msg, "AEAD roundtrip failed");
+#[test]
+fn aead_tampered_ciphertext_fails() {
+    let key = generate_session_key();
+    let nonce = generate_nonce();
+    let msg = b"test-data";
+    let mut ct = aead_encrypt(&key, &nonce, msg).unwrap();
+    if !ct.is_empty() {
+        ct[0] ^= 1; // flip one bit
     }
+    assert!(aead_decrypt(&key, &nonce, &ct).is_err());
+}
+
+#[test]
+fn aead_wrong_nonce_fails() {
+    let key = generate_session_key();
+    let n1 = generate_nonce();
+    let n2 = generate_nonce();
+    let ct = aead_encrypt(&key, &n1, b"test").unwrap();
+    assert!(aead_decrypt(&key, &n2, &ct).is_err());
+}
+
+#[test]
+fn aead_empty_plaintext_roundtrip() {
+    let key = generate_session_key();
+    let nonce = generate_nonce();
+    let ct = aead_encrypt(&key, &nonce, b"").unwrap();
+    let pt = aead_decrypt(&key, &nonce, &ct).unwrap();
+    assert!(pt.is_empty());
 }
 
 }

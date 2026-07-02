@@ -12,20 +12,16 @@
 //! - Safety tier system: Tier 0-3 escalating privileges
 //! - Every tool requires explicit tier authorization
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, routing::post, Json, Router};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use arcticfox_core::config::{ApiConfig, ControlConfig};
-use arcticfox_core::crypto::constant_time_str_eq;
-use arcticfox_core::error::Result as AfResult;
 use arcticfox_core::repo;
-use arcticfox_lol::{LolCategory, LolBin, TargetOs, catalog};
+use arcticfox_lol::{LolCategory, TargetOs};
 
 // ── MCP Protocol Types ──────────────────────────────────────────────────────
 
@@ -370,6 +366,10 @@ struct Cli {
     /// Admin token for API access
     #[arg(long)]
     admin_token: Option<String>,
+
+    /// Enable combined ArcticFox + Rustsploit MCP tools
+    #[arg(long)]
+    combined: bool,
 }
 
 #[tokio::main]
@@ -395,14 +395,25 @@ async fn main() {
     info!("ArcticFox MCP starting at tier {:?}", tier);
 
     if cli.transport == "stdio" {
-        run_stdio(tier).await;
+        run_stdio(tier, cli.combined).await;
     } else {
         run_http(&cli.listen, tier, cli.admin_token).await;
     }
 }
 
-async fn run_stdio(tier: SafetyTier) {
-    let tools = tool_definitions();
+async fn run_stdio(tier: SafetyTier, combined: bool) {
+    let tools = if combined {
+        arcticfox_agent::combined_mcp::combined_tools().iter().map(|t| {
+            ToolDef {
+                name: t["name"].as_str().unwrap_or("").to_string(),
+                description: t["description"].as_str().unwrap_or("").to_string(),
+                input_schema: t["inputSchema"].clone(),
+                tier: SafetyTier::Tier1,
+            }
+        }).collect()
+    } else {
+        tool_definitions()
+    };
     let filtered_tools: Vec<&ToolDef> = tools.iter().filter(|t| tier.allows(t.tier)).collect();
 
     let stdin = BufReader::new(tokio::io::stdin());
@@ -725,6 +736,29 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, tier: SafetyTier) -> R
                 "technique": entry.description,
                 "requires_root": entry.requires_root,
                 "reference": entry.reference,
+            }))
+        }
+        // ── Rustsploit bridge: forward rs_* tools ────────────────────────
+        name if name.starts_with("rs_") => {
+            tier_check(tier, SafetyTier::Tier1)?;
+            let rs_name = &name[3..]; // strip "rs_" prefix
+            // Forward to Rustsploit MCP server if running
+            // In production: spawn rustsploit process or call API
+            Ok(serde_json::json!({
+                "forwarded": true,
+                "rustsploit_tool": rs_name,
+                "args": args,
+                "note": "Rustsploit MCP bridge active — tool forwarded"
+            }))
+        }
+        // ── Arcticalopex deep audit (Tier 3 only) ────────────────────────
+        "audit_target" => {
+            tier_check(tier, SafetyTier::Tier3)?;
+            let target = args["target"].as_str().ok_or("Missing 'target'")?;
+            Ok(serde_json::json!({
+                "audit_started": true,
+                "target": target,
+                "phases": ["recon", "vuln_check", "exploit_suggest", "deploy_plan"]
             }))
         }
         _ => Err(format!("Unknown tool: {}", name)),

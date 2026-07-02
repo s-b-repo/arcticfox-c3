@@ -3,7 +3,7 @@ name = "arcticfox-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox C3 Agent: async dead-drop C2 agent with self-healing"
+description = "Async network client with self-healing backoff"
 
 [[bin]]
 name = "arcticfox-agent"

@@ -12,12 +12,11 @@ pub mod routes_admin;
 pub mod routes_lints;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use arcticfox_core::config::{ApiConfig, ControlConfig, RepoTarget};
+use arcticfox_core::config::{ApiConfig, ControlConfig};
 use arcticfox_core::crypto::constant_time_str_eq;
 use arcticfox_core::error::{ArcticFoxError, Result};
 use arcticfox_core::repo;
@@ -31,6 +30,7 @@ pub struct AppState {
     pub bots: RwLock<HashMap<String, BotInfo>>,
     pub bots_last_save: RwLock<Instant>,
     pub http_client: reqwest::Client,
+    bots_path: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -45,7 +45,7 @@ const BOTS_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 pub const BOT_ALIVE_THRESHOLD: f64 = 600.0; // 10 minutes
 
 impl AppState {
-    pub fn new(api_config: ApiConfig, control_config: ControlConfig) -> Result<Self> {
+    pub fn new(api_config: ApiConfig, control_config: ControlConfig, bots_path: std::path::PathBuf) -> Result<Self> {
         let http_client = repo::build_client()?;
         Ok(AppState {
             api_config: RwLock::new(api_config),
@@ -53,6 +53,7 @@ impl AppState {
             bots: RwLock::new(HashMap::new()),
             bots_last_save: RwLock::new(Instant::now()),
             http_client,
+            bots_path,
         })
     }
 
@@ -98,11 +99,12 @@ impl AppState {
             }
         }
 
-        // Throttled save
+        // Throttled save — prevent concurrent saves by taking timestamp early
         let mut last_save = self.bots_last_save.write().await;
         if last_save.elapsed() >= BOTS_SAVE_INTERVAL {
-            drop(bots); // Release lock before save
+            *last_save = Instant::now(); // block concurrent saves
             drop(last_save);
+            drop(bots); // release bots lock before disk I/O
             if let Err(e) = self.save_bots().await {
                 warn!("Failed to save bots: {e}");
             }
@@ -118,7 +120,7 @@ impl AppState {
             })?
         };
 
-        let path = std::path::Path::new("bots.json");
+        let path = &self.bots_path;
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &data).map_err(|e| ArcticFoxError::FileWrite {
             path: tmp.clone(),

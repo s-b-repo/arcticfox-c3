@@ -1,13 +1,11 @@
 //! TCP bind shell with ZW-encrypted transport and SO_REUSEPORT.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use arcticfox_zwtransport::ZwSession;
-use crate::ShellController;
 
 /// Start a ZW-encrypted TCP bind shell.
 ///

@@ -3,7 +3,7 @@ name = "arcticfox-scan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox C3 Scanner: async telnet scanner + brute-forcer"
+description = "Async network service scanner"
 
 [[bin]]
 name = "arcticfox-scan"

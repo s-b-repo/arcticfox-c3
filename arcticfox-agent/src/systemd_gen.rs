@@ -80,7 +80,7 @@ WantedBy=multi-user.target
 }
 
 /// Generate a systemd timer unit that periodically triggers the service.
-fn generate_timer_unit(name: &str, service_name: &str, interval_secs: u64) -> String {
+fn generate_timer_unit(name: &str, _service_name: &str, interval_secs: u64) -> String {
     format!(
         r#"[Unit]
 Description={name} - Periodic maintenance timer

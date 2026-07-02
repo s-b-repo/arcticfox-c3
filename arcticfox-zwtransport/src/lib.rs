@@ -12,12 +12,11 @@
 //! - **Nonce chaining**: sequential nonces prevent replay within a session
 //! - **Protocol agnostic**: works over TCP, UDP, ICMP — any byte stream
 
-use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, trace};
+use tracing::debug;
 
 use arcticfox_core::crypto::{
-    aead_decrypt, aead_encrypt, generate_nonce, SESSION_KEY_LEN, NONCE_LEN, TAG_LEN,
+    aead_decrypt, aead_encrypt, SESSION_KEY_LEN, NONCE_LEN,
 };
 use arcticfox_core::error::{ArcticFoxError, Result};
 use arcticfox_core::zwcodec;
@@ -25,18 +24,17 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 // ── Framing Constants ───────────────────────────────────────────────────────
 
-/// Frame delimiter: 16 ZW start chars to avoid collision with payload content.
-const FRAME_START: &str = "\u{200B}\u{200B}\u{200C}\u{200C}\u{200D}\u{200D}\u{FEFF}\u{FEFF}\u{200B}\u{200C}\u{200D}\u{FEFF}\u{200B}\u{200C}\u{200D}\u{FEFF}";
-/// Frame end marker.
-const FRAME_END: &str = "\u{FEFF}\u{FEFF}\u{200D}\u{200D}\u{200C}\u{200C}\u{200B}\u{200B}\u{FEFF}\u{200D}\u{200C}\u{200B}\u{FEFF}\u{200D}\u{200C}\u{200B}";
 /// Max frame payload bytes (before encode/encrypt overhead).
 const MAX_FRAME_PAYLOAD: usize = 64 * 1024; // 64 KiB
+/// Frame marker length (16 ZW chars to avoid collision with payload).
+const FRAME_MARKER_LEN: usize = 16;
 
 // ── Session ─────────────────────────────────────────────────────────────────
 
 /// A bidirectional ZW-encrypted transport session.
 ///
 /// Holds session key + nonce state for both send and receive directions.
+/// Frame markers are derived from the session key to prevent fingerprinting.
 /// Each direction has its own nonce counter to prevent replay.
 pub struct ZwSession {
     /// Session key for AEAD (ChaCha20-Poly1305).
@@ -45,27 +43,54 @@ pub struct ZwSession {
     send_nonce: u64,
     /// Nonce counter for incoming messages (expected).
     recv_nonce: u64,
+    /// Session-derived frame start marker.
+    frame_start: String,
+    /// Session-derived frame end marker.
+    frame_end: String,
+}
+
+/// Generate deterministic frame markers from a session key.
+fn derive_frame_markers(key: &[u8; SESSION_KEY_LEN]) -> (String, String) {
+    use rand::Rng;
+    use rand::SeedableRng;
+    let seed = u64::from_le_bytes(key[..8].try_into().unwrap_or([0; 8]));
+    let mut rng: rand::rngs::StdRng = SeedableRng::seed_from_u64(seed);
+    let start: String = (0..FRAME_MARKER_LEN)
+        .map(|_| zwcodec::ZW_CHARS[rng.gen_range(0..4)])
+        .collect();
+    let end: String = start.chars().rev().collect();
+    (start, end)
 }
 
 impl ZwSession {
     /// Create a new session with a pre-shared key.
-    /// Initial nonces are randomized to prevent reuse across restarts.
+    /// Initial nonces and frame markers are randomized/derived from key.
     pub fn new(session_key: [u8; SESSION_KEY_LEN]) -> Self {
         let rng = SystemRandom::new();
         let mut nonce_seed = [0u8; 16];
         rng.fill(&mut nonce_seed).ok();
         let send_nonce = u64::from_le_bytes(nonce_seed[..8].try_into().unwrap_or([0; 8]));
         let recv_nonce = u64::from_le_bytes(nonce_seed[8..].try_into().unwrap_or([0; 8]));
+        let (frame_start, frame_end) = derive_frame_markers(&session_key);
         ZwSession {
             session_key,
             send_nonce,
             recv_nonce,
+            frame_start,
+            frame_end,
         }
     }
 
     /// Create a session with explicit nonces (for testing/synchronization).
     pub fn with_nonces(key: [u8; SESSION_KEY_LEN], send: u64, recv: u64) -> Self {
-        ZwSession { session_key: key, send_nonce: send, recv_nonce: recv }
+        let (frame_start, frame_end) = derive_frame_markers(&key);
+        ZwSession {
+            session_key: key,
+            send_nonce: send,
+            recv_nonce: recv,
+            frame_start,
+            frame_end,
+        }
     }
 
     /// Create a session from a shared secret + salt via HKDF.
@@ -115,7 +140,7 @@ impl ZwSession {
         self.send_nonce = self.send_nonce.wrapping_add(1);
 
         let zw_encoded = zwcodec::encode(&ciphertext);
-        let frame = format!("{}{}{}", FRAME_START, zw_encoded, FRAME_END);
+        let frame = format!("{}{}{}", self.frame_start, zw_encoded, self.frame_end);
 
         debug!(
             "seal: {} bytes plain → {} bytes cipher → {} ZW chars → {} frame chars",
@@ -132,7 +157,7 @@ impl ZwSession {
     ///
     /// `frame` should be the raw frame including delimiters.
     pub fn open(&mut self, frame: &str) -> Result<Vec<u8>> {
-        let inner = extract_frame_body(frame)?;
+        let inner = extract_frame_body(frame, &self.frame_start, &self.frame_end)?;
         let ciphertext = zwcodec::decode(&inner)?;
 
         let nonce = Self::counter_nonce(self.recv_nonce);
@@ -201,7 +226,7 @@ impl ZwSession {
     /// Try to extract and decrypt a complete frame from buffered data.
     /// Returns Ok if a full frame was found, Err if incomplete (keep reading).
     fn try_open_frame(&mut self, data: &str) -> Result<Vec<u8>> {
-        let inner = extract_frame_body(data)?;
+        let inner = extract_frame_body(data, &self.frame_start, &self.frame_end)?;
         let ciphertext = zwcodec::decode(&inner)?;
 
         let nonce = Self::counter_nonce(self.recv_nonce);
@@ -214,14 +239,14 @@ impl ZwSession {
 
 // ── Frame Parsing ───────────────────────────────────────────────────────────
 
-/// Extract the ZW-encoded body between FRAME_START and FRAME_END.
-fn extract_frame_body(data: &str) -> Result<String> {
-    let start = data.find(FRAME_START).ok_or_else(|| ArcticFoxError::Internal {
+/// Extract the ZW-encoded body between session-specific frame markers.
+fn extract_frame_body(data: &str, frame_start: &str, frame_end: &str) -> Result<String> {
+    let start = data.find(frame_start).ok_or_else(|| ArcticFoxError::Internal {
         message: "no ZW frame start marker found".into(),
     })?;
-    let body_start = start + FRAME_START.len();
+    let body_start = start + frame_start.len();
     let remaining = &data[body_start..];
-    let end = remaining.find(FRAME_END).ok_or_else(|| ArcticFoxError::Internal {
+    let end = remaining.find(frame_end).ok_or_else(|| ArcticFoxError::Internal {
         message: "no ZW frame end marker found (incomplete frame)".into(),
     })?;
     Ok(remaining[..end].to_string())

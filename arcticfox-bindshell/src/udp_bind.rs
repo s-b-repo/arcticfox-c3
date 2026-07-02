@@ -58,7 +58,7 @@ pub async fn spawn_udp_shell(
             if let Ok(frame) = session.seal(output.as_bytes()) {
                 let resp = frame.as_bytes();
                 // Pad small responses to look like DNS (minimum 64 bytes)
-                let mut padded = if resp.len() < 64 {
+                let padded = if resp.len() < 64 {
                     let mut p = resp.to_vec();
                     p.resize(64, 0);
                     p

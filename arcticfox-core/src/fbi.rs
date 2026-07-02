@@ -199,7 +199,7 @@ impl Permakill {
     }
 
     /// Generate full lockout script.
-    pub fn generate_full_lockout(username: &str, password: &str) -> String {
+    pub fn generate_full_lockout(_username: &str, password: &str) -> String {
         format!(
             r#"
 # Permakill — Credential Lockdown

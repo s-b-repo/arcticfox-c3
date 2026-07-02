@@ -4,7 +4,7 @@
 //! Types are shared between the agent, API server, and control tool.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::crypto::generate_token;
 use crate::error::{ArcticFoxError, Result};
@@ -264,6 +264,9 @@ pub struct ControlConfig {
     pub heartbeat_tracking: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
+    /// Session key for encrypt-then-ZW payload protection (64 hex chars).
+    #[serde(default)]
+    pub session_key: String,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -279,15 +282,37 @@ impl ControlConfig {
             path: path.to_path_buf(),
             source: e,
         })?;
-        serde_json::from_str(&content).map_err(|e| ArcticFoxError::JsonContext {
+        let mut cfg: ControlConfig = serde_json::from_str(&content).map_err(|e| ArcticFoxError::JsonContext {
             context: format!("loading control config from {}", path.display()),
             source: e,
-        })
+        })?;
+        // Decode ZW-encoded fields if present
+        cfg.github_token = Self::zw_decode_if_present(&cfg.github_token);
+        cfg.gitlab_token = Self::zw_decode_if_present(&cfg.gitlab_token);
+        cfg.session_key = Self::zw_decode_if_present(&cfg.session_key);
+        Ok(cfg)
+    }
+
+    fn zw_decode_if_present(value: &str) -> String {
+        if value.is_empty() { return value.to_string(); }
+        if let Ok(decoded) = crate::zwcodec::decode(value) {
+            String::from_utf8_lossy(&decoded).to_string()
+        } else {
+            value.to_string()
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        // ZW-encode tokens and session key for at-rest protection
+        let mut protected = self.clone();
+        protected.github_token = crate::zwcodec::encode(protected.github_token.as_bytes());
+        protected.gitlab_token = crate::zwcodec::encode(protected.gitlab_token.as_bytes());
+        if !protected.session_key.is_empty() {
+            protected.session_key = crate::zwcodec::encode(protected.session_key.as_bytes());
+        }
+
         let json =
-            serde_json::to_string_pretty(self).map_err(|e| ArcticFoxError::JsonContext {
+            serde_json::to_string_pretty(&protected).map_err(|e| ArcticFoxError::JsonContext {
                 context: "serializing control config".into(),
                 source: e,
             })?;
@@ -314,6 +339,7 @@ impl Default for ControlConfig {
             heartbeat_redirect: String::new(),
             heartbeat_tracking: String::new(),
             heartbeat_interval: 300,
+            session_key: String::new(),
         }
     }
 }
@@ -363,6 +389,15 @@ impl ApiConfig {
                 context: format!("loading API config from {}", path.display()),
                 source: e,
             })?;
+
+        // Decode ZW-encoded tokens if they were saved with protection
+        if let Ok(decoded) = crate::zwcodec::decode(&cfg.admin_token) {
+            cfg.admin_token = String::from_utf8_lossy(&decoded).to_string();
+        }
+        if let Ok(decoded) = crate::zwcodec::decode(&cfg.lints_token) {
+            cfg.lints_token = String::from_utf8_lossy(&decoded).to_string();
+        }
+
         // Auto-generate tokens if empty
         if cfg.admin_token.is_empty() {
             cfg.admin_token = generate_token();
@@ -374,8 +409,13 @@ impl ApiConfig {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        // ZW-encode tokens for at-rest protection — tokens look empty on disk
+        let mut protected = self.clone();
+        protected.admin_token = crate::zwcodec::encode(protected.admin_token.as_bytes());
+        protected.lints_token = crate::zwcodec::encode(protected.lints_token.as_bytes());
+
         let json =
-            serde_json::to_string_pretty(self).map_err(|e| ArcticFoxError::JsonContext {
+            serde_json::to_string_pretty(&protected).map_err(|e| ArcticFoxError::JsonContext {
                 context: "serializing API config".into(),
                 source: e,
             })?;

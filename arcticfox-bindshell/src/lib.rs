@@ -19,9 +19,7 @@ pub mod tcp_bind;
 pub mod udp_bind;
 
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
 
 use arcticfox_core::crypto::SESSION_KEY_LEN;
 use arcticfox_zwtransport::ZwSession;

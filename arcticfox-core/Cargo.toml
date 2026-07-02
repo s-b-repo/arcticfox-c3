@@ -3,7 +3,7 @@ name = "arcticfox-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox C3 core: zero-width codec, config, crypto, error types"
+description = "Core codec and crypto utilities"
 
 [dependencies]
 tokio.workspace = true

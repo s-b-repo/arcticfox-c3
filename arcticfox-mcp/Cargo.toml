@@ -3,7 +3,7 @@ name = "arcticfox-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox MCP: Model Context Protocol server for AI-controlled C2 operations"
+description = "Model Context Protocol JSON-RPC server"
 
 [[bin]]
 name = "arcticfox-mcp"
@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 arcticfox-core = { path = "../arcticfox-core" }
+arcticfox-agent = { path = "../arcticfox-agent" }
 arcticfox-lol = { path = "../arcticfox-lol" }
 tokio.workspace = true
 serde.workspace = true

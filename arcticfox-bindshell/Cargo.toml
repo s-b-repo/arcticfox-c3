@@ -3,7 +3,7 @@ name = "arcticfox-bindshell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ArcticFox Bind Shell: multi-protocol ZW-encrypted listener (TCP/UDP/53/ICMP) with SO_REUSEPORT"
+description = "Multi-protocol network listener with crypto transport"
 
 [[bin]]
 name = "arcticfox-bindshell"

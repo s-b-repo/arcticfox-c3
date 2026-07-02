@@ -5,7 +5,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use arcticfox_api::{AppState, routes_admin, routes_lints};
@@ -97,7 +97,7 @@ async fn main() {
     };
 
     // Create app state
-    let state = match AppState::new(api_config.clone(), control_config) {
+    let state = match AppState::new(api_config.clone(), control_config, cli.bots_file.clone()) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             error!("Failed to initialize app state: {e}");
@@ -141,14 +141,14 @@ async fn main() {
         .parse()
         .unwrap_or_else(|_| "0.0.0.0:7443".parse().unwrap());
 
-    // Print startup banner
+    // Startup — no token exposure to stdout
+    let _admin_prefix = &api_config.admin_token[..api_config.admin_token.len().min(8)];
+    let _lints_prefix = &api_config.lints_token[..api_config.lints_token.len().min(8)];
     println!("\n╔═════════════════════════════════════════════╗");
-    println!("║  ArcticFox C3 API Server v{}        ║", env!("CARGO_PKG_VERSION"));
+    println!("║  C3 API Server v{}                  ║", env!("CARGO_PKG_VERSION"));
     println!("╠═════════════════════════════════════════════╣");
     println!("║  Listening: {:<33}║", addr.to_string());
-    println!("║  Admin token: {:<30}║", &api_config.admin_token[..api_config.admin_token.len().min(30)]);
-    println!("║  Lints token: {:<30}║", &api_config.lints_token[..api_config.lints_token.len().min(30)]);
-    println!("║  WARNING: No TLS — tokens in cleartext!  ║");
+    println!("║  Tokens loaded — use --gen-tokens to rotate║");
     println!("╚═════════════════════════════════════════════╝\n");
 
     info!("API server starting on {}", addr);

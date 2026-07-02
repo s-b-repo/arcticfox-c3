@@ -200,6 +200,44 @@ impl ArcticFoxError {
         }
     }
 
+    /// Sanitized user-facing message — no internal paths, URLs, or tokens.
+    pub fn user_message(&self) -> String {
+        match self {
+            ArcticFoxError::Io { .. } | ArcticFoxError::FileRead { .. }
+            | ArcticFoxError::FileWrite { .. } | ArcticFoxError::AtomicReplace { .. } => {
+                "internal I/O error".into()
+            }
+            ArcticFoxError::Http { .. } | ArcticFoxError::HttpStatus { .. }
+            | ArcticFoxError::Timeout { .. } | ArcticFoxError::Tls { .. } => {
+                "network request failed".into()
+            }
+            ArcticFoxError::Dns { .. } => "DNS resolution failed".into(),
+            ArcticFoxError::NoPayload => "no payload found".into(),
+            ArcticFoxError::TruncatedZw { .. } | ArcticFoxError::InvalidZwChar { .. }
+            | ArcticFoxError::NoHeadingForInjection => "encoding error".into(),
+            ArcticFoxError::Json { .. } | ArcticFoxError::JsonContext { .. } => "data format error".into(),
+            ArcticFoxError::ConfigNotFound { .. } | ArcticFoxError::ConfigInvalid { .. }
+            | ArcticFoxError::ConfigMissingField { .. } => "configuration error".into(),
+            ArcticFoxError::Auth { .. } | ArcticFoxError::MissingToken
+            | ArcticFoxError::InvalidTokenFormat => "authentication required".into(),
+            ArcticFoxError::Forbidden { .. } => "access denied".into(),
+            ArcticFoxError::RepoNotFound { .. } | ArcticFoxError::NoAliveRepos
+            | ArcticFoxError::InvalidRepoSpec { .. } | ArcticFoxError::MissingApiToken { .. }
+            | ArcticFoxError::PasteCreate { .. } => "repository operation failed".into(),
+            ArcticFoxError::CommandTimeout { .. } | ArcticFoxError::CommandExec { .. } => {
+                "command failed".into()
+            }
+            ArcticFoxError::Persistence { .. } => "persistence operation failed".into(),
+            ArcticFoxError::AlreadyRunning { .. } => "already running".into(),
+            ArcticFoxError::ScanTarget { .. } | ArcticFoxError::HoneypotDetected { .. } => {
+                "scan target error".into()
+            }
+            ArcticFoxError::Internal { .. } | ArcticFoxError::LockPoisoned { .. } => {
+                "internal server error".into()
+            }
+        }
+    }
+
     /// Check if this error is retryable (transient).
     pub fn is_retryable(&self) -> bool {
         matches!(
