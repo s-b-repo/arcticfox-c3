@@ -131,6 +131,11 @@ async fn main() {
         .route("/api/admin/bots", get(routes_admin::list_bots))
         .route("/api/admin/bots/{bot_id}", delete(routes_admin::remove_bot))
         .route("/api/admin/stats", get(routes_admin::stats))
+        // Scanner
+        .route("/api/admin/scan/start", post(routes_admin::start_scan))
+        .route("/api/admin/scan/stop", post(routes_admin::stop_scan))
+        .route("/api/admin/scan/status", get(routes_admin::get_scan_status))
+        .route("/api/admin/scan/results", get(routes_admin::get_scan_results).post(routes_admin::submit_scan_result).delete(routes_admin::clear_scan))
         // Lints
         .route("/api/lints/status", get(routes_lints::lints_status))
         .route("/api/lints/bots", get(routes_lints::lints_bots))

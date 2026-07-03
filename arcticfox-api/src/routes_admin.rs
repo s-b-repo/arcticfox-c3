@@ -13,7 +13,7 @@ use tracing::warn;
 use arcticfox_core::config::RepoTarget;
 use arcticfox_core::repo;
 
-use crate::{AppState, Role, json_err, json_ok, BOT_ALIVE_THRESHOLD};
+use crate::{AppState, Role, ScanEntry, ScanStatus, json_err, json_ok, BOT_ALIVE_THRESHOLD};
 
 // ── Repo Management ─────────────────────────────────────────────────────────
 
@@ -502,4 +502,94 @@ async fn check_admin(
     }
 
     Ok(role)
+}
+
+// ── Scanner Endpoints ────────────────────────────────────────────────────────
+
+pub async fn start_scan(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    let mut status = state.scan_status.write().await;
+    if status.running {
+        return Err(json_err("Scan already running", 409));
+    }
+    *status = ScanStatus {
+        running: true,
+        targets_total: body.get("targets_total").and_then(|v| v.as_u64()).unwrap_or(0),
+        targets_scanned: 0, open_ports: 0, honeypots: 0, cracked: 0,
+        started_at: chrono::Utc::now().timestamp() as f64,
+    };
+    let mut results = state.scan_results.write().await;
+    results.clear();
+    Ok(json_ok(serde_json::json!({"status": "started"})))
+}
+
+pub async fn stop_scan(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    let mut status = state.scan_status.write().await;
+    status.running = false;
+    Ok(json_ok(serde_json::json!({"status": "stopped"})))
+}
+
+pub async fn get_scan_status(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    let status = state.scan_status.read().await.clone();
+    Ok(json_ok(serde_json::to_value(status).unwrap_or_default()))
+}
+
+pub async fn get_scan_results(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    let results = state.scan_results.read().await.clone();
+    Ok(json_ok(serde_json::json!({"results": results, "total": results.len()})))
+}
+
+pub async fn submit_scan_result(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    let entry = crate::ScanEntry {
+        ip: body["ip"].as_str().unwrap_or("?").to_string(),
+        port: body["port"].as_u64().unwrap_or(0) as u16,
+        banner: body["banner"].as_str().map(|s| s.to_string()),
+        username: body["username"].as_str().map(|s| s.to_string()),
+        password_ciphertext: body["password_ciphertext"].as_str().map(|s| s.to_string()),
+        is_honeypot: body["is_honeypot"].as_bool().unwrap_or(false),
+        timestamp: chrono::Utc::now().timestamp() as f64,
+    };
+    let cracked = entry.username.is_some();
+    let is_hp = entry.is_honeypot;
+    state.scan_results.write().await.push(entry);
+    let mut status = state.scan_status.write().await;
+    status.targets_scanned += 1;
+    status.open_ports += 1;
+    if is_hp { status.honeypots += 1; }
+    if cracked { status.cracked += 1; }
+    Ok(json_ok(serde_json::json!({"submitted": true})))
+}
+
+pub async fn clear_scan(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _role = check_admin(&state, headers.get("Authorization").and_then(|v| v.to_str().ok())).await?;
+    state.scan_results.write().await.clear();
+    *state.scan_status.write().await = crate::ScanStatus {
+        running: false, targets_total: 0, targets_scanned: 0,
+        open_ports: 0, honeypots: 0, cracked: 0, started_at: 0.0,
+    };
+    Ok(json_ok(serde_json::json!({"cleared": true})))
 }

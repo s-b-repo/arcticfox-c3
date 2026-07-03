@@ -290,4 +290,28 @@ impl ApiClient {
             padding_enabled: json["padding_enabled"].as_bool().unwrap_or(false),
         })
     }
+
+    // ── Scanner ───────────────────────────────────────────────────────
+
+    pub async fn start_scan(&self, target: &str, ports: &str, max_targets: u64) -> Result<Value, String> {
+        self.post("/api/admin/scan/start", serde_json::json!({
+            "target": target, "ports": ports, "targets_total": max_targets
+        })).await
+    }
+
+    pub async fn stop_scan(&self) -> Result<Value, String> {
+        self.post("/api/admin/scan/stop", serde_json::json!({})).await
+    }
+
+    pub async fn get_scan_status(&self) -> Result<Value, String> {
+        self.get("/api/admin/scan/status").await
+    }
+
+    pub async fn get_scan_results(&self) -> Result<Value, String> {
+        self.get("/api/admin/scan/results").await
+    }
+
+    pub async fn clear_scan(&self) -> Result<Value, String> {
+        self.delete("/api/admin/scan/results").await
+    }
 }
