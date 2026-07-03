@@ -407,14 +407,6 @@ impl ApiConfig {
                 source: e,
             })?;
 
-        // Decode ZW-encoded tokens if they were saved with protection
-        if let Ok(decoded) = crate::zwcodec::decode(&cfg.admin_token) {
-            cfg.admin_token = String::from_utf8_lossy(&decoded).to_string();
-        }
-        if let Ok(decoded) = crate::zwcodec::decode(&cfg.lints_token) {
-            cfg.lints_token = String::from_utf8_lossy(&decoded).to_string();
-        }
-
         // Auto-generate tokens if empty
         if cfg.admin_token.is_empty() {
             cfg.admin_token = generate_token();
@@ -426,13 +418,8 @@ impl ApiConfig {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        // ZW-encode tokens for at-rest protection — tokens look empty on disk
-        let mut protected = self.clone();
-        protected.admin_token = crate::zwcodec::encode(protected.admin_token.as_bytes());
-        protected.lints_token = crate::zwcodec::encode(protected.lints_token.as_bytes());
-
         let json =
-            serde_json::to_string_pretty(&protected).map_err(|e| ArcticFoxError::JsonContext {
+            serde_json::to_string_pretty(self).map_err(|e| ArcticFoxError::JsonContext {
                 context: "serializing API config".into(),
                 source: e,
             })?;

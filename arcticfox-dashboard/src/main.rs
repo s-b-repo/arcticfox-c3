@@ -55,6 +55,13 @@ async fn main() {
     let token = cli.token.unwrap_or_else(|| {
         std::env::var("C3_TOKEN").unwrap_or_default()
     });
+    // Auto-detect ZW-encoded tokens (from api_config.json at-rest protection)
+    let token = if !token.is_empty() {
+        if let Ok(decoded) = arcticfox_core::zwcodec::decode(&token) {
+            let decoded_str = String::from_utf8_lossy(&decoded).to_string();
+            if decoded_str.len() > 4 { decoded_str } else { token }
+        } else { token }
+    } else { token };
 
     if token.is_empty() && !cli.local {
         eprintln!("Error: --token required for remote mode (or set C3_TOKEN env var)");

@@ -134,7 +134,12 @@ fn read_token_from_file() -> String {
             let prefix_len = "\"admin_token\": \"".len();
             let rest = &content[start + prefix_len..];
             if let Some(end) = rest.find('"') {
-                return rest[..end].to_string();
+                let raw = rest[..end].to_string();
+                // Try ZW-decode in case tokens are stored encoded (at-rest protection)
+                if let Ok(decoded) = arcticfox_core::zwcodec::decode(&raw) {
+                    return String::from_utf8_lossy(&decoded).to_string();
+                }
+                return raw;
             }
         }
     }

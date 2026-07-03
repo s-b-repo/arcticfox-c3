@@ -32,20 +32,18 @@ api:
 	echo "  Press Ctrl+C to stop"; \
 	wait
 
-## Start the dashboard (requires API server running)
+## Start the dashboard (auto-decodes ZW-protected tokens)
 dashboard:
 	@ADMIN=$$(grep admin_token api_config.json | cut -d'"' -f4); \
-	cargo run --release --bin c3 -- --token $$ADMIN
+	cargo run --release --bin c3 -- --token "$$ADMIN"
 
-## Run guided setup wizard (walks through first-time configuration)
+## Run guided setup (auto-decodes ZW-protected tokens)  
 setup:
 	@echo "=== C3 Guided Setup ==="
-	@echo ""
-	@echo "  Starting API server in background..."
 	@cargo run --release --bin arcticfox-api > /tmp/c3-api.log 2>&1 &
 	@sleep 3
 	@ADMIN=$$(grep admin_token api_config.json | cut -d'"' -f4); \
-	cargo run --release --bin c3 -- --token $$ADMIN --setup; \
+	cargo run --release --bin c3 -- --token "$$ADMIN" --setup; \
 	kill $$(lsof -ti:7443) 2>/dev/null; \
 	true
 
