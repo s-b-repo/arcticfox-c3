@@ -8,6 +8,7 @@ mod api;
 mod app;
 mod ui;
 mod tabs;
+mod setup;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -30,11 +31,20 @@ struct Cli {
     /// Path to config directory (default: ~/.c3/)
     #[arg(long, default_value = "~/.c3")]
     config_dir: PathBuf,
+
+    /// Run guided setup wizard (no TUI)
+    #[arg(long, short = 'S')]
+    setup: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if cli.setup {
+        setup::run_setup().await;
+        return;
+    }
 
     let api_url = if cli.local {
         "http://127.0.0.1:7443".to_string()
