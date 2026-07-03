@@ -49,7 +49,8 @@ fn detect_debugger() -> bool {
                 debug!("Debugger detected: ptrace attach failed");
                 return true;
             }
-            libc::ptrace(libc::PTRACE_DETACH, 0, 0, 0);
+            // PTRACE_TRACEME sets the trace flag — no PTRACE_DETACH needed.
+            // Calling DETACH on self (pid=0) is undefined behavior.
         }
     }
 

@@ -101,12 +101,18 @@ pub async fn run_setup() {
             });
             let path = prompt_default("Save to", "pb_config.json");
             if !path.is_empty() {
-                let _ = std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap_or_default());
-                println!("  Saved to {path}");
-                println!("  Deploy: cargo run --bin arcticfox-agent -- --config {path}\n");
+                match serde_json::to_string_pretty(&config) {
+                    Ok(json) => {
+                        let _ = std::fs::write(&path, &json);
+                        println!("  Saved to {path}");
+                        println!("  Deploy: cargo run --bin arcticfox-agent -- --config {path}\n");
+                    }
+                    Err(e) => println!("  Failed to serialize: {e}\n"),
+                }
             }
         }
-        _ => println!("  No repos configured yet. Add repos first (Step 3).\n"),
+        Ok(_) => println!("  No repos configured yet. Add repos first (Step 3).\n"),
+        Err(e) => println!("  Failed to list repos: {e}\n"),
     }
 
     // Save

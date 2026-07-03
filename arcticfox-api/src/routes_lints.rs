@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{AppState, authenticate, json_err, json_ok, BOT_ALIVE_THRESHOLD, Role};
 
@@ -141,7 +141,7 @@ pub async fn heartbeat_receiver(
         })
         .unwrap_or("unknown");
 
-    info!("Heartbeat from bot {} (IP: {})", bot_hash, ip);
+    debug!("Heartbeat from bot {} (IP: {})", bot_hash, ip);
     state.record_heartbeat(&bot_hash, ip).await;
 
     // Embed ZW-encoded timestamp in response — invisible to humans,

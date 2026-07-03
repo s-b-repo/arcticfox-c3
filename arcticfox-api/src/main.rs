@@ -74,8 +74,9 @@ async fn main() {
             error!("Failed to save new tokens: {e}");
             std::process::exit(1);
         }
-        println!("Admin token: {}", api_config.admin_token);
-        println!("Lints token: {}", api_config.lints_token);
+        println!("Admin token: {}...", &api_config.admin_token[..api_config.admin_token.len().min(8)]);
+        println!("Lints token: {}...", &api_config.lints_token[..api_config.lints_token.len().min(8)]);
+        println!("Full tokens saved to {}", cli.api_config.display());
         return;
     }
 

@@ -92,7 +92,7 @@ impl AppState {
         if bots.len() > 10_000 {
             // Remove the 1000 oldest bots
             let mut sorted: Vec<(&String, &BotInfo)> = bots.iter().collect();
-            sorted.sort_by(|a, b| a.1.last_seen.partial_cmp(&b.1.last_seen).unwrap());
+            sorted.sort_by(|a, b| a.1.last_seen.partial_cmp(&b.1.last_seen).unwrap_or(std::cmp::Ordering::Equal));
             let to_remove: Vec<String> = sorted.iter().take(1000).map(|(k, _)| (*k).clone()).collect();
             for k in &to_remove {
                 bots.remove(k);
