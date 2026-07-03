@@ -59,7 +59,7 @@ pub async fn add_repo(
         .and_then(|v| v.as_str())
         .ok_or_else(|| json_err("Missing 'repo' field", 400))?;
 
-    let repo = repo::parse_repo_spec(spec).map_err(|e| json_err(&e.to_string(), 400))?;
+    let repo = repo::parse_repo_spec(spec).map_err(|e| json_err(&e.user_message(), 400))?;
 
     let mut config = state.control_config.write().await;
     let idx = config.repos.len();
@@ -244,7 +244,7 @@ pub async fn pull(
             "payload": payload,
         }))),
         Ok(None) => Err(json_err("No payload found", 404)),
-        Err(e) => Err(json_err(&e.to_string(), 404)),
+        Err(e) => Err(json_err(&e.user_message(), 404)),
     }
 }
 
@@ -278,7 +278,7 @@ pub async fn create_paste(
 
     let content = "# Notes\n\nMiscellaneous.\n";
     let injected = arcticfox_core::zwcodec::inject(content, &payload, pad)
-        .map_err(|e| json_err(&e.to_string(), 500))?;
+        .map_err(|e| json_err(&e.user_message(), 500))?;
 
     match repo::DebianPaste::create(&injected, &state.http_client).await {
         Ok(paste_id) => {
@@ -296,7 +296,7 @@ pub async fn create_paste(
                 "url": format!("https://paste.debian.net/{}", paste_id),
             })))
         }
-        Err(e) => Err(json_err(&e.to_string(), 502)),
+        Err(e) => Err(json_err(&e.user_message(), 502)),
     }
 }
 
@@ -400,11 +400,11 @@ pub async fn save_config(
 
     let ctrl_config = state.control_config.read().await;
     ctrl_config.save(std::path::Path::new("control_config.json"))
-        .map_err(|e| json_err(&e.to_string(), 500))?;
+        .map_err(|e| json_err(&e.user_message(), 500))?;
 
     let api_config = state.api_config.read().await;
     api_config.save(std::path::Path::new("api_config.json"))
-        .map_err(|e| json_err(&e.to_string(), 500))?;
+        .map_err(|e| json_err(&e.user_message(), 500))?;
 
     Ok(json_ok(serde_json::json!({"saved": true})))
 }
@@ -495,7 +495,7 @@ async fn check_admin(
 ) -> std::result::Result<Role, (StatusCode, Json<serde_json::Value>)> {
     let role = crate::authenticate(state, auth_header)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     if role != Role::Admin {
         return Err(json_err("Admin access required", 403));

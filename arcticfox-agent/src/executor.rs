@@ -134,6 +134,29 @@ async fn execute_download(args: &str) -> Result<String> {
 
     debug!("Downloading {} -> {} (run={}, hide={})", url, dest, run, hide);
 
+    // Restrict destination to /tmp/ or agent temp dir to prevent path traversal
+    let dest_path = std::path::Path::new(dest);
+    if dest_path.components().any(|c| c == std::path::Component::ParentDir) {
+        return Ok("[error: path traversal detected — '..' not allowed]".into());
+    }
+    let temp = std::env::temp_dir();
+    let dest = if dest_path.is_relative() {
+        temp.join(dest_path).to_string_lossy().to_string()
+    } else if dest_path.starts_with(&temp) || dest_path.starts_with("/dev/shm") {
+        dest.to_string()
+    } else {
+        return Ok(format!("[error: destination must be in {} or /dev/shm]", temp.display()));
+    };
+
+    let temp = std::env::temp_dir();
+    let safe_dest = if dest_path.is_relative() {
+        temp.join(dest_path).to_string_lossy().to_string()
+    } else if dest_path.starts_with(&temp) || dest_path.starts_with("/dev/shm") {
+        dest.to_string()
+    } else {
+        return Ok(format!("[error: destination must be in {} or /dev/shm]", temp.display()));
+    };
+
     // Download
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -157,22 +180,23 @@ async fn execute_download(args: &str) -> Result<String> {
     })?;
 
     // Write to destination
-    std::fs::write(dest, &bytes).map_err(|e| {
+    let write_path = safe_dest.clone();
+    std::fs::write(&safe_dest, &bytes).map_err(|e| {
         arcticfox_core::error::ArcticFoxError::FileWrite {
-            path: dest.into(),
+            path: write_path.into(),
             source: e,
         }
     })?;
 
     // Hide the file
-    let mut actual_dest = dest.to_string();
+    let mut actual_dest = safe_dest.clone();
     if hide {
         if cfg!(target_os = "windows") {
             let _ = std::process::Command::new("attrib")
-                .args(["+H", dest])
+                .args(["+H", &actual_dest])
                 .output();
         } else {
-            let path = std::path::Path::new(dest);
+            let path = std::path::Path::new(&actual_dest);
             if let Some(parent) = path.parent() {
                 if let Some(name) = path.file_name() {
                     let hidden = parent.join(format!(".{}", name.to_string_lossy()));
@@ -189,17 +213,17 @@ async fn execute_download(args: &str) -> Result<String> {
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", dest])
+                .args(["/C", "start", &actual_dest])
                 .spawn();
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = std::fs::set_permissions(dest, std::os::unix::fs::PermissionsExt::from_mode(0o755));
-            let _ = std::process::Command::new(dest).spawn();
+            let _ = std::fs::set_permissions(&actual_dest, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+            let _ = std::process::Command::new(&actual_dest).spawn();
         }
     }
 
-    Ok(format!("Downloaded to {}", dest))
+    Ok(format!("Downloaded to {}", safe_dest))
 }
 
 /// Exfiltrate a local file to a remote URL (HTTP POST).

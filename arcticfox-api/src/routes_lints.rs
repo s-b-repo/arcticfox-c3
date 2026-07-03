@@ -20,7 +20,7 @@ pub async fn lints_status(
     let auth_hdr = headers.get("Authorization").and_then(|v| v.to_str().ok());
     let _role = authenticate(&state, auth_hdr)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     let now = chrono::Utc::now().timestamp() as f64;
     let bots = state.bots.read().await;
@@ -49,7 +49,7 @@ pub async fn lints_bots(
     let auth_hdr = headers.get("Authorization").and_then(|v| v.to_str().ok());
     let _role = authenticate(&state, auth_hdr)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     let bots = state.bots.read().await;
     let now = chrono::Utc::now().timestamp() as f64;
@@ -84,7 +84,7 @@ pub async fn lints_repos(
     let auth_hdr = headers.get("Authorization").and_then(|v| v.to_str().ok());
     let _role = authenticate(&state, auth_hdr)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     let config = state.control_config.read().await;
     let repos: Vec<serde_json::Value> = config
@@ -112,7 +112,7 @@ pub async fn lints_commands(
     let auth_hdr = headers.get("Authorization").and_then(|v| v.to_str().ok());
     let _role = authenticate(&state, auth_hdr)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     let config = state.control_config.read().await;
     Ok(json_ok(serde_json::json!({
@@ -163,7 +163,7 @@ pub async fn whoami(
     let auth_hdr = headers.get("Authorization").and_then(|v| v.to_str().ok());
     let role = authenticate(&state, auth_hdr)
         .await
-        .map_err(|e| json_err(&e.to_string(), 401))?;
+        .map_err(|e| json_err(&e.user_message(), 401))?;
 
     let role_str = match role {
         Role::Admin => "admin",

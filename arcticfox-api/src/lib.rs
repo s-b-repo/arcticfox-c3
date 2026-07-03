@@ -130,6 +130,11 @@ impl AppState {
             path: path.to_path_buf(),
             source: e,
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
 
         *self.bots_last_save.write().await = Instant::now();
         Ok(())
