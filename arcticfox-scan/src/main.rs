@@ -338,16 +338,27 @@ impl Scanner {
         }
     }
 
-    async fn run_syn_scan(&mut self, targets: &[String]) {
-        info!("SYN scanning {} targets at {} pps...", targets.len(), self.rate);
-        let mut scanner = match syn::SynScanner::new(std::net::Ipv4Addr::new(0, 0, 0, 0), self.rate) {
+    async fn run_syn_scan(&mut self, targets: Vec<String>) {
+        let ports = self.ports.clone();
+        let rate = self.rate;
+        let targets_clone = targets.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            Self::syn_scan_blocking(&targets_clone, &ports, rate)
+        }).await.unwrap_or_else(|_| Vec::new());
+        self.results.extend(results);
+    }
+
+    fn syn_scan_blocking(targets: &[String], ports: &[u16], rate: u32) -> Vec<ScanResult> {
+        info!("SYN scanning {} targets at {} pps...", targets.len(), rate);
+        let mut scanner = match syn::SynScanner::new(std::net::Ipv4Addr::new(0, 0, 0, 0), rate) {
             Ok(s) => s,
             Err(e) => {
-                error!("SYN scan unavailable (need root/CAP_NET_RAW): {e}. Falling back to TCP connect.");
-                return self.run_scan(targets).await;
+                error!("SYN scan unavailable (need root/CAP_NET_RAW): {e}");
+                return Vec::new();
             }
         };
 
+        let mut results = Vec::new();
         let mut open_ips: std::collections::HashMap<(u32, u16), (u8, u16)> = std::collections::HashMap::new();
         let start = std::time::Instant::now();
         let batch = 256;
@@ -357,7 +368,7 @@ impl Scanner {
             for ip_str in chunk {
                 if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
                     let ip_u32 = u32::from(ip);
-                    for &port in &self.ports {
+                    for &port in ports {
                         if let Err(e) = scanner.send_syn(ip_u32, port) {
                             if e.kind() == std::io::ErrorKind::WouldBlock { continue; }
                             debug!("SYN send error: {e}");
@@ -366,31 +377,27 @@ impl Scanner {
                     }
                 }
             }
-            // Receive responses
-            for result in scanner.recv_syn_acks(1024) {
-                open_ips.insert((result.ip, result.port), (result.ttl, result.window_size));
+            for r in scanner.recv_syn_acks(1024) {
+                open_ips.insert((r.ip, r.port), (r.ttl, r.window_size));
             }
         }
 
-        // Drain remaining responses
         std::thread::sleep(Duration::from_millis(500));
-        for result in scanner.recv_syn_acks(65536) {
-            open_ips.insert((result.ip, result.port), (result.ttl, result.window_size));
+        for r in scanner.recv_syn_acks(65536) {
+            open_ips.insert((r.ip, r.port), (r.ttl, r.window_size));
         }
 
         let elapsed = start.elapsed();
         info!("SYN scan complete: {} sent in {:.1}s ({:.0} pps), {} open ports found",
             sent, elapsed.as_secs_f64(), sent as f64 / elapsed.as_secs_f64().max(0.001), open_ips.len());
 
-        // Convert to ScanResults
         for ((ip_u32, port), (_ttl, _window)) in &open_ips {
-            let ip = u32_to_ip(*ip_u32);
-            let is_hp = false; // SYN scan can't read banners
-            self.results.push(ScanResult {
-                ip, port: *port, open: true,
-                banner: None, brute_success: None, is_honeypot: is_hp,
+            results.push(ScanResult {
+                ip: u32_to_ip(*ip_u32), port: *port, open: true,
+                banner: None, brute_success: None, is_honeypot: false,
             });
         }
+        results
     }
 
     async fn run_scan(&mut self, targets: &[String]) {
@@ -674,7 +681,8 @@ async fn main() {
     info!("Scanning {} targets on ports {:?}", targets.len(), cli.ports);
     let mut scanner = Scanner::new(&cli);
     if cli.syn {
-        scanner.run_syn_scan(&targets).await;
+        let targets_clone = targets.clone();
+        scanner.run_syn_scan(targets_clone).await;
     } else {
         scanner.run_scan(&targets).await;
     }

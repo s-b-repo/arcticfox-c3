@@ -82,9 +82,12 @@ impl SynScanner {
             fd
         };
 
+        // Auto-detect source IP for proper SYN-ACK routing
+        let actual_src = detect_source_ip().map(|ip| u32::from(Ipv4Addr::from(ip))).unwrap_or(u32::from(src_ip));
+
         Ok(SynScanner {
             raw_fd,
-            src_ip: u32::from(src_ip),
+            src_ip: actual_src,
             src_port: (rand::random::<u16>() % 50000 + 1024),
             rate: RateLimiter::new(rate),
         })
@@ -241,6 +244,29 @@ fn tcp_checksum(tcp_segment: &[u8], src_ip: u32, dst_ip: u32) -> u16 {
     }
     while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
     !(sum as u16)
+}
+
+/// Auto-detect the machine's source IP by connecting a dummy UDP socket to a public IP.
+fn detect_source_ip() -> Option<u32> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 { return None; }
+    let addr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as u16,
+        sin_port: 53u16.to_be(),
+        sin_addr: libc::in_addr { s_addr: 0x08080808u32.to_be() }, // 8.8.8.8
+        sin_zero: [0u8; 8],
+    };
+    let ret = unsafe {
+        libc::connect(sock, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32)
+    };
+    if ret < 0 { unsafe { libc::close(sock); } return None; }
+    let mut local = libc::sockaddr_in { sin_family: 0, sin_port: 0, sin_addr: libc::in_addr { s_addr: 0 }, sin_zero: [0u8; 8] };
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as u32;
+    let ret = unsafe {
+        libc::getsockname(sock, &mut local as *mut _ as *mut libc::sockaddr, &mut len)
+    };
+    unsafe { libc::close(sock); }
+    if ret == 0 { Some(u32::from_be(local.sin_addr.s_addr)) } else { None }
 }
 
 #[cfg(test)]
