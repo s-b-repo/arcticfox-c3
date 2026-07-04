@@ -18,6 +18,8 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod syn;
+
 // ── Honeypot Detection ──────────────────────────────────────────────────────
 
 const HONEYPOT_BANNERS: &[&str] = &[
@@ -126,6 +128,10 @@ struct Cli {
     /// Max open ports per host before flagging as potential honeypot
     #[arg(long, default_value_t = 8)]
     max_open_ports: usize,
+
+    /// Use SYN scanning (raw sockets, requires root/CAP_NET_RAW)
+    #[arg(long)]
+    syn: bool,
 }
 
 // ── Bogon / IANA Reserved Ranges (RFC 6890 + RFC 8190) ──────────────────────
@@ -293,6 +299,7 @@ struct Scanner {
     scan_only: bool,
     max_open_ports: usize,
     rate: u32,
+    syn_mode: bool,
     results: Vec<ScanResult>,
 }
 
@@ -326,7 +333,63 @@ impl Scanner {
             scan_only: cli.scan_only,
             max_open_ports: cli.max_open_ports,
             rate: cli.rate,
+            syn_mode: cli.syn,
             results: Vec::new(),
+        }
+    }
+
+    async fn run_syn_scan(&mut self, targets: &[String]) {
+        info!("SYN scanning {} targets at {} pps...", targets.len(), self.rate);
+        let mut scanner = match syn::SynScanner::new(std::net::Ipv4Addr::new(0, 0, 0, 0), self.rate) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("SYN scan unavailable (need root/CAP_NET_RAW): {e}. Falling back to TCP connect.");
+                return self.run_scan(targets).await;
+            }
+        };
+
+        let mut open_ips: std::collections::HashMap<(u32, u16), (u8, u16)> = std::collections::HashMap::new();
+        let start = std::time::Instant::now();
+        let batch = 256;
+        let mut sent = 0u64;
+
+        for chunk in targets.chunks(batch) {
+            for ip_str in chunk {
+                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    let ip_u32 = u32::from(ip);
+                    for &port in &self.ports {
+                        if let Err(e) = scanner.send_syn(ip_u32, port) {
+                            if e.kind() == std::io::ErrorKind::WouldBlock { continue; }
+                            debug!("SYN send error: {e}");
+                        }
+                        sent += 1;
+                    }
+                }
+            }
+            // Receive responses
+            for result in scanner.recv_syn_acks(1024) {
+                open_ips.insert((result.ip, result.port), (result.ttl, result.window_size));
+            }
+        }
+
+        // Drain remaining responses
+        std::thread::sleep(Duration::from_millis(500));
+        for result in scanner.recv_syn_acks(65536) {
+            open_ips.insert((result.ip, result.port), (result.ttl, result.window_size));
+        }
+
+        let elapsed = start.elapsed();
+        info!("SYN scan complete: {} sent in {:.1}s ({:.0} pps), {} open ports found",
+            sent, elapsed.as_secs_f64(), sent as f64 / elapsed.as_secs_f64().max(0.001), open_ips.len());
+
+        // Convert to ScanResults
+        for ((ip_u32, port), (_ttl, _window)) in &open_ips {
+            let ip = u32_to_ip(*ip_u32);
+            let is_hp = false; // SYN scan can't read banners
+            self.results.push(ScanResult {
+                ip, port: *port, open: true,
+                banner: None, brute_success: None, is_honeypot: is_hp,
+            });
         }
     }
 
@@ -610,7 +673,11 @@ async fn main() {
 
     info!("Scanning {} targets on ports {:?}", targets.len(), cli.ports);
     let mut scanner = Scanner::new(&cli);
-    scanner.run_scan(&targets).await;
+    if cli.syn {
+        scanner.run_syn_scan(&targets).await;
+    } else {
+        scanner.run_scan(&targets).await;
+    }
 
     // Print results
     let open: Vec<_> = scanner.results.iter().filter(|r| r.open).collect();

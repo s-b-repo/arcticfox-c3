@@ -19,3 +19,5 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 rand.workspace = true
 ipnet = "2"
+libc = "0.2"
+
